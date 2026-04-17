@@ -35,8 +35,6 @@
 
 /* Map State */
 static char world_map[MAP_SIZE][MAP_SIZE];
-static int link_x = 0;
-static int link_y = 0;
 
 /* Symbols for display */
 static char
@@ -71,17 +69,45 @@ hyrule_map_read(struct cdev *dev, struct uio *uio, int ioflag)
 
 	sx_slock(&hyrule_sx);
 
+	if (!hyrule_is_active()) {
+		const char *msg = (hyrule_power == 0) ? "POWER OFF\n" : "GAME OVER\n";
+		int msg_len = strlen(msg);
+		if (uio->uio_offset >= msg_len) {
+			sx_sunlock(&hyrule_sx);
+			return (0);
+		}
+		int error = uiomove(__DECONST(char *, msg) + uio->uio_offset, msg_len - uio->uio_offset, uio);
+		sx_sunlock(&hyrule_sx);
+		return (error);
+	}
+
+	int lx = hyrule_get_prop_int("characters/link/location/x", 0);
+	int ly = hyrule_get_prop_int("characters/link/location/y", 0);
+
 	pos += snprintf(buf + pos, sizeof(buf) - pos, "--- Hyrule Map ---\n");
 	for (y = 0; y < MAP_SIZE; y++) {
+		/* Row border */
 		for (x = 0; x < MAP_SIZE; x++) {
-			if (x == link_x && y == link_y)
-				pos += snprintf(buf + pos, sizeof(buf) - pos, "L");
-			else
-				pos += snprintf(buf + pos, sizeof(buf) - pos, "%c", get_map_symbol(world_map[y][x]));
+			pos += snprintf(buf + pos, sizeof(buf) - pos, "+---");
 		}
-		pos += snprintf(buf + pos, sizeof(buf) - pos, "\n");
+		pos += snprintf(buf + pos, sizeof(buf) - pos, "+\n");
+
+		/* Row content */
+		for (x = 0; x < MAP_SIZE; x++) {
+			if (x == lx && y == ly)
+				pos += snprintf(buf + pos, sizeof(buf) - pos, "| L ");
+			else
+				pos += snprintf(buf + pos, sizeof(buf) - pos, "| %c ", get_map_symbol(world_map[y][x]));
+		}
+		pos += snprintf(buf + pos, sizeof(buf) - pos, "|\n");
 	}
-	pos += snprintf(buf + pos, sizeof(buf) - pos, "Link at: (%d, %d)\n", link_x, link_y);
+	/* Final border */
+	for (x = 0; x < MAP_SIZE; x++) {
+		pos += snprintf(buf + pos, sizeof(buf) - pos, "+---");
+	}
+	pos += snprintf(buf + pos, sizeof(buf) - pos, "+\n");
+
+	pos += snprintf(buf + pos, sizeof(buf) - pos, "Link at: (%d, %d)\n", lx, ly);
 
 	if (uio->uio_offset >= pos) {
 		sx_sunlock(&hyrule_sx);
@@ -94,6 +120,38 @@ hyrule_map_read(struct cdev *dev, struct uio *uio, int ioflag)
 }
 
 /* Read/Write /dev/hyrule/world/map_config */
+void
+hyrule_map_get_config(char *buf, size_t size)
+{
+	int x, y, pos = 0;
+
+	for (y = 0; y < MAP_SIZE; y++) {
+		for (x = 0; x < MAP_SIZE; x++) {
+			if (pos < size - 1)
+				buf[pos++] = world_map[y][x];
+		}
+		if (pos < size - 1)
+			buf[pos++] = '\n';
+	}
+	buf[pos] = '\0';
+}
+
+void
+hyrule_map_set_config(const char *input, size_t len)
+{
+	int x = 0, y = 0, i;
+
+	for (i = 0; i < len && y < MAP_SIZE; i++) {
+		if (isspace(input[i])) continue;
+		world_map[y][x] = input[i];
+		x++;
+		if (x >= MAP_SIZE) {
+			x = 0;
+			y++;
+		}
+	}
+}
+
 static int
 hyrule_map_config_read(struct cdev *dev, struct uio *uio, int ioflag)
 {
@@ -101,6 +159,19 @@ hyrule_map_config_read(struct cdev *dev, struct uio *uio, int ioflag)
 	int x, y, pos = 0;
 
 	sx_slock(&hyrule_sx);
+
+	if (!hyrule_is_active()) {
+		const char *msg = (hyrule_power == 0) ? "POWER OFF\n" : "GAME OVER\n";
+		int msg_len = strlen(msg);
+		if (uio->uio_offset >= msg_len) {
+			sx_sunlock(&hyrule_sx);
+			return (0);
+		}
+		int error = uiomove(__DECONST(char *, msg) + uio->uio_offset, msg_len - uio->uio_offset, uio);
+		sx_sunlock(&hyrule_sx);
+		return (error);
+	}
+
 	for (y = 0; y < MAP_SIZE; y++) {
 		for (x = 0; x < MAP_SIZE; x++) {
 			buf[pos++] = world_map[y][x];
@@ -126,6 +197,12 @@ hyrule_map_config_write(struct cdev *dev, struct uio *uio, int ioflag)
 	int error, len, x = 0, y = 0, i;
 
 	sx_xlock(&hyrule_sx);
+
+	if (!hyrule_power) {
+		sx_xunlock(&hyrule_sx);
+		return (EACCES);
+	}
+
 	len = MIN(uio->uio_resid, sizeof(input) - 1);
 	error = uiomove(input, len, uio);
 	if (error) {
@@ -153,9 +230,16 @@ hyrule_move_write(struct cdev *dev, struct uio *uio, int ioflag)
 {
 	char cmd[16];
 	int error, len;
-	int nx = link_x, ny = link_y;
+	int nx = hyrule_get_prop_int("characters/link/location/x", 0);
+	int ny = hyrule_get_prop_int("characters/link/location/y", 0);
 
 	sx_xlock(&hyrule_sx);
+
+	if (!hyrule_power) {
+		sx_xunlock(&hyrule_sx);
+		return (EACCES);
+	}
+
 	len = MIN(uio->uio_resid, sizeof(cmd) - 1);
 	error = uiomove(cmd, len, uio);
 	if (error) {
@@ -174,9 +258,9 @@ hyrule_move_write(struct cdev *dev, struct uio *uio, int ioflag)
 	}
 
 	if (is_accessible(nx, ny)) {
-		link_x = nx;
-		link_y = ny;
-		printf("[HYRULE] Link moved to (%d, %d)\n", link_x, link_y);
+		hyrule_set_prop_int("characters/link/location/x", nx);
+		hyrule_set_prop_int("characters/link/location/y", ny);
+		printf("[HYRULE] Link moved to (%d, %d)\n", nx, ny);
 	} else {
 		printf("[HYRULE] Path blocked at (%d, %d)!\n", nx, ny);
 	}
@@ -185,6 +269,23 @@ hyrule_move_write(struct cdev *dev, struct uio *uio, int ioflag)
 	return (0);
 }
 
+void
+hyrule_map_init(void)
+{
+	int x, y;
+	/* Initialize map with some fields and a dungeon */
+	for (y = 0; y < MAP_SIZE; y++) {
+		for (x = 0; x < MAP_SIZE; x++) {
+			world_map[y][x] = 'f';
+		}
+	}
+	world_map[5][5] = 'd'; /* Dungeon in center (5,5) */
+	world_map[5][0] = 'W'; /* Blocked woods at (0,5) */
+}
+
+/* 
+ * Character device operations for the map.
+ */
 struct cdevsw hyrule_map_cdevsw = {
 	.d_version = D_VERSION,
 	.d_open = hyrule_open,
@@ -233,19 +334,3 @@ struct cdevsw hyrule_move_cdevsw = {
 	.d_purge = hyrule_purge,
 	.d_name = "hyrule_move",
 };
-
-void
-hyrule_map_init(void)
-{
-	int x, y;
-	/* Initialize map with some fields and a dungeon */
-	for (y = 0; y < MAP_SIZE; y++) {
-		for (x = 0; x < MAP_SIZE; x++) {
-			world_map[y][x] = 'f';
-		}
-	}
-	world_map[5][5] = 'd'; /* Dungeon in center (5,5) */
-	world_map[5][0] = 'W'; /* Blocked woods at (0,5) */
-	link_x = 0;
-	link_y = 0;
-}

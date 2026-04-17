@@ -54,6 +54,7 @@ struct hyrule_prop {
 	struct cdev *cdev;
 	char name[256];
 	char value[1024]; /* Enough for 10x10 map and strings */
+	char default_value[1024];
 	LIST_ENTRY(hyrule_prop) next;
 };
 
@@ -61,6 +62,8 @@ struct hyrule_prop {
 extern struct mtx hyrule_mtx;
 extern struct sx hyrule_sx;
 extern LIST_HEAD(prop_head, hyrule_prop) prop_list;
+extern int hyrule_power;
+extern int hyrule_cartridge;
 
 /* Shared device operations */
 d_open_t  hyrule_open;
@@ -79,12 +82,20 @@ d_purge_t hyrule_purge;
 /* Helper functions in hyrule.c */
 int add_hyrule_node(const char *path, const char *initial_val);
 int add_hyrule_node_custom(const char *path, const char *initial_val, struct cdevsw *sw);
+void hyrule_reset(void);
+int hyrule_is_active(void);
+int hyrule_get_prop_int(const char *name, int default_val);
+void hyrule_set_prop_int(const char *name, int val);
 
 /* Map logic in hyrule_map.c */
 extern struct cdevsw hyrule_map_cdevsw;
 extern struct cdevsw hyrule_map_config_cdevsw;
 extern struct cdevsw hyrule_move_cdevsw;
+extern struct cdevsw hyrule_save_cdevsw;
+extern struct cdevsw hyrule_load_cdevsw;
 
 void hyrule_map_init(void);
+void hyrule_map_get_config(char *buf, size_t size);
+void hyrule_map_set_config(const char *input, size_t len);
 
 #endif /* _HYRULE_H_ */

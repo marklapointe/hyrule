@@ -1,5 +1,0 @@
-syntax(2)
-
-test_suite("hyrule")
-
-atf_test_program{name="hyrule_test.sh"}

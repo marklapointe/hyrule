@@ -36,6 +36,20 @@ The module also features a world map system. Link's position is tracked on a 10x
 grid. Users can move Link and configure the map through dedicated device nodes.
 .Sh FILES
 .Bl -tag -width ".Pa /dev/hyrule/map" -compact
+.It Pa /dev/hyrule/console/power
+Power switch for the console. Write '1' to turn on (and reset), '0' to turn off.
+If the cartridge is dusty, power-on may fail randomly.
+.It Pa /dev/hyrule/console/reset
+Reset button. Write '1' to restore all character stats and map to default values.
+.It Pa /dev/hyrule/console/cartridge
+Represents the game cartridge. Can be 'clean' or 'dusty'.
+If 'dusty', reading other devices may result in random graphics glitches.
+Write 'blow' to this device to clean the cartridge and stabilize the system.
+.It Pa /dev/hyrule/game/save
+Save device. Reading from this device provides a serialized state of the game
+that can be redirected to a file.
+.It Pa /dev/hyrule/game/load
+Load device. Writing a previously saved state to this device restores the game session.
 .It Pa /dev/hyrule/help
 A help device providing usage instructions.
 .It Pa /dev/hyrule/map
@@ -68,18 +82,25 @@ To see the current status of Link's health:
 To equip Link with a new weapon:
 .Pp
 .Dl "echo 'Master Sword' > /dev/hyrule/characters/link/weapons/sword"
+.Pp
+To save the current game state:
+.Pp
+.Dl "cat /dev/hyrule/game/save > mysave.sav"
+.Pp
+To reload a previously saved game:
+.Pp
+.Dl "cat mysave.sav > /dev/hyrule/game/load"
 .Sh SEE ALSO
 .Xr kldload 8 ,
 .Xr kldunload 8
 .Sh HISTORY
 The
 .Nm
-module first appeared in a silly experiment on FreeBSD 16.0.
+module first appeared in April 2026 as a demonstration of a game-like kernel interface.
 .Sh AUTHORS
 The
 .Nm
 module was written by
-.An Junie Aq .
+.An Mark LaPointe Aq mark@cloudbsd.org .
 .Sh BUGS
-Watch out for Mobils and Ganon.
-A kernel panic may occur if you are not careful with the Triforce.
+Ganon is still at large.

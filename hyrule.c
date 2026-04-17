@@ -37,6 +37,8 @@
 #include <sys/taskqueue.h>
 #include <sys/syscallsubr.h>
 #include <sys/linker.h>
+#include <sys/kthread.h>
+#include <sys/proc.h>
 
 /*
  * Hyrule Kernel Module Core
@@ -48,41 +50,89 @@ struct prop_head prop_list = LIST_HEAD_INITIALIZER(prop_list);
 struct mtx hyrule_mtx;	/* Protects prop_list */
 struct sx hyrule_sx;	/* Protects property values across uiomove */
 
-static struct timeout_task *hyrule_death_task;
-static int hyrule_unloading = 0;
+static struct cdevsw hyrule_cdevsw;
 
-static void
-hyrule_death_worker(void *arg, int pending)
+int hyrule_power = 1;
+int hyrule_cartridge = 0; /* Starts dusty */
+
+int
+hyrule_get_prop_int(const char *name, int default_val)
 {
-	int error;
-	struct timeout_task *tt = arg;
+	struct hyrule_prop *p;
+	int val = default_val;
+
+	mtx_lock(&hyrule_mtx);
+	LIST_FOREACH(p, &prop_list, next) {
+		if (strcmp(p->name, name) == 0) {
+			val = strtol(p->value, NULL, 10);
+			break;
+		}
+	}
+	mtx_unlock(&hyrule_mtx);
+	return (val);
+}
+
+void
+hyrule_set_prop_int(const char *name, int val)
+{
+	struct hyrule_prop *p;
+
+	mtx_lock(&hyrule_mtx);
+	LIST_FOREACH(p, &prop_list, next) {
+		if (strcmp(p->name, name) == 0) {
+			snprintf(p->value, sizeof(p->value), "%d\n", val);
+			break;
+		}
+	}
+	mtx_unlock(&hyrule_mtx);
+}
+
+int
+hyrule_is_active(void)
+{
+	struct hyrule_prop *p;
+	long hp = 1;
+
+	if (hyrule_power == 0)
+		return (0);
+
+	/* Random instability if cartridge is dusty */
+	if (hyrule_cartridge == 0 && (arc4random() % 100) < 30) {
+		return (0);
+	}
+
+	mtx_lock(&hyrule_mtx);
+	LIST_FOREACH(p, &prop_list, next) {
+		if (strcmp(p->name, "characters/link/stats/health") == 0) {
+			hp = strtol(p->value, NULL, 10);
+			break;
+		}
+	}
+	mtx_unlock(&hyrule_mtx);
+
+	return (hp > 0);
+}
+
+void
+hyrule_reset(void)
+{
+	struct hyrule_prop *p;
 
 	/*
-	 * __this_linker_file is a special symbol provided by the kernel linker
-	 * that points to the struct linker_file for the current module.
+	 * We don't lock hyrule_sx here because this might be called from
+	 * hyrule_write which already holds it.
+	 * But we should ensure we have exclusive access if called from elsewhere.
+	 * For now, we only call it from hyrule_write or during init.
 	 */
-	if (__this_linker_file != NULL) {
-		printf("[HYRULE] It's dangerous to go alone! Link is gone. Unloading module...\n");
-		hyrule_unloading = 1;
-
-		/*
-		 * kern_kldunload() is the kernel-side implementation of the kldunload syscall.
-		 * It safely triggers the module's MOD_UNLOAD event.
-		 * 
-		 * Note: After this call succeeds, the module's code and data are unmapped.
-		 * We rely on the fact that the task structure was heap-allocated to avoid
-		 * a panic in the taskqueue loop when it accesses the task structure
-		 * after we return.
-		 */
-		error = kern_kldunload(curthread, __this_linker_file->id, LINKER_UNLOAD_NORMAL);
-		if (error != 0) {
-			printf("[HYRULE] Self-unload failed (error=%d). Retrying in 1s...\n", error);
-			hyrule_unloading = 0;
-			taskqueue_enqueue_timeout(taskqueue_thread, tt, hz);
-		}
-	} else {
-		printf("[HYRULE] Could not find linker file for self-unload.\n");
+	mtx_lock(&hyrule_mtx);
+	LIST_FOREACH(p, &prop_list, next) {
+		strlcpy(p->value, p->default_value, sizeof(p->value));
 	}
+	mtx_unlock(&hyrule_mtx);
+
+	hyrule_map_init();
+	
+	printf("[HYRULE] System Reset. Welcome back!\n");
 }
 
 static struct cdevsw hyrule_cdevsw = {
@@ -209,6 +259,31 @@ hyrule_read(struct cdev *dev, struct uio *uio, int ioflag)
 		return (ENXIO);
 
 	sx_slock(&hyrule_sx);
+
+	/* Check if system is active */
+	if (!hyrule_is_active() && 
+	    strcmp(p->name, "console/power") != 0 && 
+	    strcmp(p->name, "console/reset") != 0 &&
+	    strcmp(p->name, "console/cartridge") != 0 &&
+	    strcmp(p->name, "help") != 0) {
+		const char *msg;
+		if (hyrule_power == 0)
+			msg = "POWER OFF\n";
+		else if (hyrule_cartridge == 0)
+			msg = "GRAPHICS GLITCH - PLEASE BLOW ON CARTRIDGE\n";
+		else
+			msg = "GAME OVER\n";
+		
+		len = strlen(msg);
+		if (uio->uio_offset >= len) {
+			sx_sunlock(&hyrule_sx);
+			return (0);
+		}
+		error = uiomove(__DECONST(char *, msg) + uio->uio_offset, len - uio->uio_offset, uio);
+		sx_sunlock(&hyrule_sx);
+		return (error);
+	}
+
 	len = strnlen(p->value, sizeof(p->value));
 	if (uio->uio_offset >= len) {
 		sx_sunlock(&hyrule_sx);
@@ -217,6 +292,50 @@ hyrule_read(struct cdev *dev, struct uio *uio, int ioflag)
 	error = uiomove(p->value + uio->uio_offset, len - uio->uio_offset, uio);
 	sx_sunlock(&hyrule_sx);
 	return (error);
+}
+
+static void hyrule_update_prop_state(struct hyrule_prop *p, int loading);
+
+void
+hyrule_update_prop_state(struct hyrule_prop *p, int loading)
+{
+	/* Handle Console commands */
+	if (strcmp(p->name, "console/power") == 0) {
+		int new_power = strtol(p->value, NULL, 10);
+		if (new_power != hyrule_power) {
+			if (new_power == 1 && !loading) {
+				/* 80% chance to fail to turn on if dusty */
+				if (hyrule_cartridge == 0 && (arc4random() % 100) < 80) {
+					printf("[HYRULE] Power-on failed. Red light blinking. Cartridge dusty?\n");
+					return;
+				}
+				hyrule_reset();
+			}
+			hyrule_power = new_power;
+			printf("[HYRULE] Power set to %d\n", hyrule_power);
+		}
+	} else if (strcmp(p->name, "console/reset") == 0) {
+		if (strtol(p->value, NULL, 10) == 1) {
+			hyrule_reset();
+			strlcpy(p->value, "0\n", sizeof(p->value));
+		}
+	} else if (strcmp(p->name, "console/cartridge") == 0) {
+		if (strncmp(p->value, "blow", 4) == 0 || strncmp(p->value, "clean", 5) == 0) {
+			hyrule_cartridge = 1;
+			if (strncmp(p->value, "blow", 4) == 0)
+				strlcpy(p->value, "clean\n", sizeof(p->value));
+			printf("[HYRULE] Cartridge is now clean and ready to play!\n");
+		} else {
+			/* Any other write makes it dusty again */
+			hyrule_cartridge = 0;
+			strlcpy(p->value, "dusty\n", sizeof(p->value));
+		}
+	} else if (strcmp(p->name, "characters/link/stats/health") == 0) {
+		long hp = strtol(p->value, NULL, 10);
+		if (hp <= 0) {
+			printf("[HYRULE] Link has no life left! GAME OVER.\n");
+		}
+	}
 }
 
 int
@@ -230,6 +349,13 @@ hyrule_write(struct cdev *dev, struct uio *uio, int ioflag)
 		return (ENXIO);
 
 	sx_xlock(&hyrule_sx);
+
+	/* Only allow changes if power is on */
+	if (!hyrule_power && strcmp(p->name, "console/power") != 0) {
+		sx_xunlock(&hyrule_sx);
+		return (EACCES);
+	}
+
 	if (uio->uio_offset >= sizeof(p->value) - 1) {
 		sx_xunlock(&hyrule_sx);
 		return (EFBIG);
@@ -238,19 +364,221 @@ hyrule_write(struct cdev *dev, struct uio *uio, int ioflag)
 	error = uiomove(p->value + uio->uio_offset, len, uio);
 	p->value[sizeof(p->value) - 1] = '\0';
 
-	/* Check for Link's death */
-	if (error == 0 && strcmp(p->name, "characters/link/stats/health") == 0) {
-		long hp = strtol(p->value, NULL, 10);
-		if (hp <= 0) {
-			printf("[HYRULE] Link has no life left! GAME OVER.\n");
-			if (hyrule_death_task != NULL)
-				taskqueue_enqueue_timeout(taskqueue_thread, hyrule_death_task, hz);
-		}
+	if (error != 0) {
+		sx_xunlock(&hyrule_sx);
+		return (error);
 	}
 
+	hyrule_update_prop_state(p, 0);
+
 	sx_xunlock(&hyrule_sx);
+	return (0);
+}
+
+static d_read_t hyrule_save_read;
+static d_write_t hyrule_load_write;
+static int hyrule_validate_save(const char *buf, size_t total_len);
+
+static int
+hyrule_validate_save(const char *buf, size_t total_len)
+{
+	const char *p = buf;
+	const char *end = buf + total_len;
+
+	while (p < end) {
+		/* Skip empty lines and whitespace between blocks */
+		while (p < end && (*p == '\n' || *p == '\r' || *p == ' ')) p++;
+		if (p >= end) break;
+
+		/* Check "PROP:" */
+		if (end - p < 5 || strncmp(p, "PROP:", 5) != 0) return (EINVAL);
+		p += 5;
+		const char *name_start = p;
+		const char *line_end = memchr(p, '\n', end - p);
+		if (!line_end) return (EINVAL);
+		
+		size_t name_len = line_end - name_start;
+		if (name_len > 0 && name_start[name_len-1] == '\r') name_len--;
+		
+		char tmp_name[256];
+		if (name_len >= sizeof(tmp_name)) return (EINVAL);
+		memcpy(tmp_name, name_start, name_len);
+		tmp_name[name_len] = '\0';
+
+		/* Validate property existence */
+		int found = 0;
+		if (strcmp(tmp_name, "world/map_config") == 0) {
+			found = 1;
+		} else {
+			struct hyrule_prop *prop;
+			mtx_lock(&hyrule_mtx);
+			LIST_FOREACH(prop, &prop_list, next) {
+				if (strcmp(prop->name, tmp_name) == 0) {
+					found = 1;
+					break;
+				}
+			}
+			mtx_unlock(&hyrule_mtx);
+		}
+		if (!found) return (ENOENT);
+
+		p = line_end + 1;
+
+		/* Check "SIZE:" */
+		if (end - p < 5 || strncmp(p, "SIZE:", 5) != 0) return (EINVAL);
+		p += 5;
+		line_end = memchr(p, '\n', end - p);
+		if (!line_end) return (EINVAL);
+
+		size_t val_len = 0;
+		for (const char *c = p; c < line_end; c++) {
+			if (*c == '\r') continue;
+			if (*c < '0' || *c > '9') return (EINVAL);
+			val_len = val_len * 10 + (*c - '0');
+		}
+		if (val_len > 1024) return (EFBIG);
+
+		p = line_end + 1;
+		if (end - p < val_len) return (EINVAL);
+
+		p += val_len;
+		/* Values should be followed by newline or end of buffer */
+		if (p < end && *p != '\n' && *p != '\r') return (EINVAL);
+	}
+	return (0);
+}
+
+static int
+hyrule_save_read(struct cdev *dev, struct uio *uio, int ioflag)
+{
+	char *buf;
+	int len = 0, error;
+	struct hyrule_prop *p;
+
+	buf = malloc(16384, M_DEVBUF, M_WAITOK | M_ZERO);
+
+	sx_slock(&hyrule_sx);
+	mtx_lock(&hyrule_mtx);
+	LIST_FOREACH(p, &prop_list, next) {
+		if (strcmp(p->name, "help") == 0 ||
+		    strcmp(p->name, "map") == 0 ||
+		    strcmp(p->name, "characters/link/location/move") == 0 ||
+		    strcmp(p->name, "console/reset") == 0 ||
+		    strcmp(p->name, "game/save") == 0 ||
+		    strcmp(p->name, "game/load") == 0)
+			continue;
+
+		if (strcmp(p->name, "world/map_config") == 0) {
+			char mapbuf[128];
+			hyrule_map_get_config(mapbuf, sizeof(mapbuf));
+			len += snprintf(buf + len, 16384 - len, "PROP:%s\nSIZE:%zu\n%s\n\n",
+			    p->name, strlen(mapbuf), mapbuf);
+		} else {
+			len += snprintf(buf + len, 16384 - len, "PROP:%s\nSIZE:%zu\n%s\n\n",
+			    p->name, strlen(p->value), p->value);
+		}
+	}
+	mtx_unlock(&hyrule_mtx);
+	sx_sunlock(&hyrule_sx);
+
+	if (uio->uio_offset >= len) {
+		free(buf, M_DEVBUF);
+		return (0);
+	}
+	error = uiomove(buf + uio->uio_offset, len - uio->uio_offset, uio);
+	free(buf, M_DEVBUF);
 	return (error);
 }
+
+static int
+hyrule_load_write(struct cdev *dev, struct uio *uio, int ioflag)
+{
+	char *buf, *p_ptr, *line, *name, *val_str;
+	size_t len, val_len;
+	int error;
+
+	len = uio->uio_resid;
+	if (len > 16384) return (EFBIG);
+
+	buf = malloc(len + 1, M_DEVBUF, M_WAITOK | M_ZERO);
+	error = uiomove(buf, len, uio);
+	if (error) {
+		free(buf, M_DEVBUF);
+		return (error);
+	}
+	buf[len] = '\0';
+
+	/* Validation step: reject everything if any part is incorrect */
+	error = hyrule_validate_save(buf, len);
+	if (error != 0) {
+		printf("[HYRULE] Load rejected: Invalid save format or property (error=%d)\n", error);
+		free(buf, M_DEVBUF);
+		return (error);
+	}
+
+	sx_xlock(&hyrule_sx);
+	p_ptr = buf;
+	while (p_ptr && *p_ptr) {
+		/* Skip empty lines */
+		while (*p_ptr == '\n' || *p_ptr == '\r' || *p_ptr == ' ') p_ptr++;
+		if (*p_ptr == '\0') break;
+
+		line = strsep(&p_ptr, "\n");
+		if (line && strncmp(line, "PROP:", 5) == 0) {
+			name = line + 5;
+			/* Trim possible \r */
+			size_t nlen = strlen(name);
+			if (nlen > 0 && name[nlen-1] == '\r') name[nlen-1] = '\0';
+
+			line = strsep(&p_ptr, "\n");
+			if (line && strncmp(line, "SIZE:", 5) == 0) {
+				val_len = strtoul(line + 5, NULL, 10);
+				val_str = p_ptr;
+				if (val_str && val_len <= strlen(val_str)) {
+					p_ptr += val_len;
+					char saved = *p_ptr;
+					*p_ptr = '\0';
+
+					if (strcmp(name, "world/map_config") == 0) {
+						hyrule_map_set_config(val_str, val_len);
+					} else {
+						struct hyrule_prop *prop;
+						mtx_lock(&hyrule_mtx);
+						LIST_FOREACH(prop, &prop_list, next) {
+							if (strcmp(prop->name, name) == 0) {
+								strlcpy(prop->value, val_str, sizeof(prop->value));
+								hyrule_update_prop_state(prop, 1);
+								break;
+							}
+						}
+						mtx_unlock(&hyrule_mtx);
+					}
+					*p_ptr = saved;
+				}
+			}
+		}
+	}
+	sx_xunlock(&hyrule_sx);
+
+	free(buf, M_DEVBUF);
+	return (0);
+}
+
+struct cdevsw hyrule_save_cdevsw = {
+	.d_version = D_VERSION,
+	.d_open = hyrule_open,
+	.d_close = hyrule_close,
+	.d_read = hyrule_save_read,
+	.d_name = "hyrule_save",
+};
+
+struct cdevsw hyrule_load_cdevsw = {
+	.d_version = D_VERSION,
+	.d_open = hyrule_open,
+	.d_close = hyrule_close,
+	.d_write = hyrule_load_write,
+	.d_name = "hyrule_load",
+};
 
 int
 add_hyrule_node_custom(const char *path, const char *initial_val, struct cdevsw *sw)
@@ -268,13 +596,14 @@ add_hyrule_node_custom(const char *path, const char *initial_val, struct cdevsw 
 
 	strlcpy(p->name, path, sizeof(p->name));
 	strlcpy(p->value, initial_val, sizeof(p->value));
+	strlcpy(p->default_value, initial_val, sizeof(p->default_value));
 
 	make_dev_args_init(&args);
 	args.mda_flags = MAKEDEV_CHECKNAME | MAKEDEV_WAITOK;
 	args.mda_devsw = sw;
 	args.mda_uid = UID_ROOT;
 	args.mda_gid = GID_WHEEL;
-	args.mda_mode = 0644;
+	args.mda_mode = 0666;
 	args.mda_si_drv1 = p;
 
 	error = make_dev_s(&args, &p->cdev, "hyrule/%s", p->name);
@@ -307,15 +636,15 @@ hyrule_loader(struct module *mod, int cmd, void *arg)
 		mtx_init(&hyrule_mtx, "hyrule list lock", NULL, MTX_DEF);
 		sx_init(&hyrule_sx, "hyrule data lock");
 		
-		/* 
-		 * Heap-allocate the death task to prevent use-after-free
-		 * during self-unload. If the module unloads itself,
-		 * the taskqueue may still access this structure.
-		 */
-		hyrule_death_task = malloc(sizeof(*hyrule_death_task), M_DEVBUF, M_WAITOK | M_ZERO);
-		TIMEOUT_TASK_INIT(taskqueue_thread, hyrule_death_task, 0, hyrule_death_worker, hyrule_death_task);
-		
 		hyrule_map_init();
+
+		/* Console */
+		error = add_hyrule_node("console/power", "1\n");
+		if (error) goto fail;
+		error = add_hyrule_node("console/reset", "0\n");
+		if (error) goto fail;
+		error = add_hyrule_node("console/cartridge", "dusty\n");
+		if (error) goto fail;
 
 		/* Help device */
 		error = add_hyrule_node("help", 
@@ -334,13 +663,21 @@ hyrule_loader(struct module *mod, int cmd, void *arg)
 		if (error) goto fail;
 		error = add_hyrule_node_custom("characters/link/location/move", "", &hyrule_move_cdevsw);
 		if (error) goto fail;
+		error = add_hyrule_node_custom("game/save", "", &hyrule_save_cdevsw);
+		if (error) goto fail;
+		error = add_hyrule_node_custom("game/load", "", &hyrule_load_cdevsw);
+		if (error) goto fail;
 
 		/* Characters */
-		error = add_hyrule_node("characters/link/stats/health", "100\n");
+		error = add_hyrule_node("characters/link/stats/health", "3\n");
 		if (error) goto fail;
 		error = add_hyrule_node("characters/link/stats/stamina", "100\n");
 		if (error) goto fail;
 		error = add_hyrule_node("characters/link/stats/rupees", "0\n");
+		if (error) goto fail;
+		error = add_hyrule_node("characters/link/location/x", "0\n");
+		if (error) goto fail;
+		error = add_hyrule_node("characters/link/location/y", "0\n");
 		if (error) goto fail;
 		error = add_hyrule_node("characters/link/weapons/sword", "Master Sword\n");
 		if (error) goto fail;
@@ -367,15 +704,6 @@ hyrule_loader(struct module *mod, int cmd, void *arg)
 		break;
 
 	case MOD_UNLOAD:
-		if (!hyrule_unloading) {
-			if (hyrule_death_task != NULL) {
-				taskqueue_cancel_timeout(taskqueue_thread, hyrule_death_task, NULL);
-				taskqueue_drain_timeout(taskqueue_thread, hyrule_death_task);
-				free(hyrule_death_task, M_DEVBUF);
-				hyrule_death_task = NULL;
-			}
-		}
-
 		while (1) {
 			mtx_lock(&hyrule_mtx);
 			p = LIST_FIRST(&prop_list);
@@ -417,13 +745,6 @@ hyrule_loader(struct module *mod, int cmd, void *arg)
 	return (error);
 
 fail:
-	if (hyrule_death_task != NULL) {
-		taskqueue_cancel_timeout(taskqueue_thread, hyrule_death_task, NULL);
-		taskqueue_drain_timeout(taskqueue_thread, hyrule_death_task);
-		free(hyrule_death_task, M_DEVBUF);
-		hyrule_death_task = NULL;
-	}
-
 	while (1) {
 		mtx_lock(&hyrule_mtx);
 		p = LIST_FIRST(&prop_list);

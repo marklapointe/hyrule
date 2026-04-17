@@ -10,7 +10,7 @@ This file tracks the active agents (characters) and their current state in the H
 - **Properties**: Sword, Bow
 - **Location**: Dynamically tracked on the 10x10 Map (`/dev/hyrule/map`)
 - **Movements**: North, South, East, West (via `/dev/hyrule/characters/link/location/move`)
-- **Special**: If health reaches 0, the kernel module unloads.
+- **Special**: If health reaches 0, the game enters a "GAME OVER" state.
 
 ### Princess Zelda
 - **Role**: Princess of Hyrule / Holder of Wisdom
