@@ -11,6 +11,9 @@ The `hyrule` module is a character device driver that creates a hierarchical str
 ## Features
 
 - **Hierarchical Device Tree**: Devices are organized by type and name, such as `/dev/hyrule/characters/link/stats/health`.
+- **Map System**: A 10x10 map of Hyrule accessible via `/dev/hyrule/map`. Track Link's position and explore fields, woods, and dungeons.
+- **Link's Movement**: Move Link around the map by writing commands like `up`, `down`, `left`, `right`, or cardinal directions (`n`, `s`, `e`, `w`) to `/dev/hyrule/characters/link/location/move`.
+- **Map Configuration**: Customize the world map by writing a grid of characters to `/dev/hyrule/world/map_config`. Lowercase characters are accessible, while uppercase characters block Link's path.
 - **Character Stats**: Read and update attributes like health, stamina, magic, and rupees for characters like Link and Zelda.
 - **Help System**: A built-in help device at `/dev/hyrule/help` provides usage instructions.
 - **Manual Page**: Comprehensive documentation accessible via `man hyrule`.
@@ -41,6 +44,17 @@ sudo kldload hyrule
 List the available device nodes:
 ```bash
 ls -R /dev/hyrule
+```
+
+### Map and Movement
+View the map:
+```bash
+cat /dev/hyrule/map
+```
+
+Move Link east:
+```bash
+echo "east" | sudo tee /dev/hyrule/characters/link/location/move
 ```
 
 ### Reading Stats

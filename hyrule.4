@@ -1,9 +1,9 @@
-.Dd April 16, 2026
+.Dd April 17, 2026
 .Dt HYRULE 4
 .Os
 .Sh NAME
 .Nm hyrule
-.Nd Hyrulian Kernel Interface
+.Nd Hyrulian Kernel Interface and World Map
 .Sh SYNOPSIS
 To compile this driver into the kernel,
 place the following line in your
@@ -32,18 +32,35 @@ standard file operations.
 Characters and objects are organized as follows:
 .Pa /dev/hyrule/{type}/{name}/{category}/{property}
 .Pp
-Each property is a virtual file that can be read to get its current value or
-written to update it.
+The module also features a world map system. Link's position is tracked on a 10x10
+grid. Users can move Link and configure the map through dedicated device nodes.
 .Sh FILES
-.Bl -tag -width ".Pa /dev/hyrule/help" -compact
+.Bl -tag -width ".Pa /dev/hyrule/map" -compact
 .It Pa /dev/hyrule/help
 A help device providing usage instructions.
+.It Pa /dev/hyrule/map
+Displays the current state of the Hyrulian world map, including Link's position
+denoted by 'L'.
+.It Pa /dev/hyrule/world/map_config
+A configuration device for the 10x10 map grid. Lowercase characters represent
+accessible terrain, while uppercase characters represent blocked areas.
+.It Pa /dev/hyrule/characters/link/location/move
+A movement device for Link. Commands like "up", "down", "left", "right" or
+cardinal directions like "n", "s", "w", "e" can be written to this device.
 .It Pa /dev/hyrule/characters/
-Directory containing character data.
+Directory containing character data (health, stamina, rupees).
 .It Pa /dev/hyrule/objects/
-Directory containing object data.
+Directory containing object data (Triforce).
 .El
 .Sh EXAMPLES
+To see the current world map:
+.Pp
+.Dl "cat /dev/hyrule/map"
+.Pp
+To move Link north:
+.Pp
+.Dl "echo 'up' > /dev/hyrule/characters/link/location/move"
+.Pp
 To see the current status of Link's health:
 .Pp
 .Dl "cat /dev/hyrule/characters/link/stats/health"
