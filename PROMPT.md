@@ -13,6 +13,7 @@
 10. **External Relocation**: Move the module source from `/usr/src/sys/modules/hyrule` to `/home/mlapointe/git/hyrule` to separate it from the base system.
 11. **Installation Support**: Ensure the `Makefile` supports system-wide installation.
 12. **Project Documentation**: Create a `README.md` with instructions and a `LICENSE` file with a 3-Clause BSD license.
+13. **Clean Repo**: Add a `.gitignore` to keep compiled objects out of the repository.
 
 #### Accomplishments
 -   **Robust Device Creation**: Safely creates nested paths like `/dev/hyrule/characters/link/stats/health`.
@@ -24,4 +25,4 @@
 -   **Clean Lifecycle**: Module loading and unloading is fully handled with safe memory management.
 -   **System Isolation**: Successfully relocated the project to a user-owned directory (`/home/mlapointe/git/hyrule`), decoupled from the core kernel source tree.
 -   **Installation Ready**: Verified that `make install` handles module and man page deployment.
--   **Project Metadata**: Added `README.md` and `LICENSE` (3-Clause BSD) with author information and fair use statements.
+-   **Project Metadata**: Added `README.md`, `LICENSE` (3-Clause BSD), and `.gitignore` to maintain a professional project structure.

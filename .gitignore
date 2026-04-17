@@ -1,0 +1,10 @@
+*.ko
+*.o
+.depend.*
+export_syms
+i386
+machine
+x86
+opt_*.h
+*.core
+.kyua/
