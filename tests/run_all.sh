@@ -21,7 +21,7 @@ sudo bash tests/save_load_test.sh
 sudo bash tests/safe_load_test.sh
 sudo bash tests/controller_test.sh
 sudo bash tests/local_item_test.sh
-sudo bash tests/konami_test.sh
+sudo bash tests/combo_test.sh
 sudo bash tests/dungeon_test.sh
 
 echo "=== All tests completed ==="

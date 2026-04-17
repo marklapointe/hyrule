@@ -1,6 +1,6 @@
 #!/usr/local/bin/bash
 
-# Test for Konami Code and Invincibility in /dev/hyrule/
+# Test for Combo and Invincibility in /dev/hyrule/
 
 DEV_ROOT="/dev/hyrule"
 
@@ -59,18 +59,18 @@ echo blow | sudo tee $DEV_ROOT/console/cartridge > /dev/null
 echo 1 | sudo tee $DEV_ROOT/console/power > /dev/null
 sleep 1
 
-# 8. Enter Konami Code
+# 8. Enter Combo
 # Sequence: Up, Up, Down, Down, Left, Right, Left, Right, B, A, Start
 # Link needs to be at a position where all directions are available and stay available
 # during the sequence. (2,2) is a good starting point.
-echo "Moving Link to (2,2) to enable Konami Code sequence..."
+echo "Moving Link to (2,2) to enable Combo sequence..."
 cat $DEV_ROOT/console/controller/down > /dev/null
 cat $DEV_ROOT/console/controller/down > /dev/null
 cat $DEV_ROOT/console/controller/right > /dev/null
 cat $DEV_ROOT/console/controller/right > /dev/null
 sleep 1
 
-echo "Entering Konami Code..."
+echo "Entering Combo..."
 cat $DEV_ROOT/console/controller/up > /dev/null
 cat $DEV_ROOT/console/controller/up > /dev/null
 cat $DEV_ROOT/console/controller/down > /dev/null
@@ -116,5 +116,5 @@ if [ $? -eq 0 ]; then
     exit 1
 fi
 
-echo "Konami Code and Invincibility tests PASSED!"
+echo "Combo and Invincibility tests PASSED!"
 exit 0

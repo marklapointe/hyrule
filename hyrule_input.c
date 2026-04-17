@@ -76,26 +76,26 @@ struct cdevsw hyrule_controller_cdevsw = {
 	.d_name = "hyrule_controller",
 };
 
-static int konami_index = 0;
-static const int konami_code[] = { 0, 0, 1, 1, 2, 3, 2, 3, 5, 4, 7 }; /* U, U, D, D, L, R, L, R, B, A, Start */
+static int h_idx = 0;
+static const int h_seq[] = { 0, 0, 1, 1, 2, 3, 2, 3, 5, 4, 7 }; /* U, U, D, D, L, R, L, R, B, A, Start */
 
 static void
-check_konami_code(int input)
+check_combo_seq(int input)
 {
-	if (input == konami_code[konami_index]) {
-		konami_index++;
-		if (konami_index == (sizeof(konami_code) / sizeof(konami_code[0]))) {
-			printf("[HYRULE] Konami Code Activated! Link is now invincible.\n");
+	if (input == h_seq[h_idx]) {
+		h_idx++;
+		if (h_idx == (sizeof(h_seq) / sizeof(h_seq[0]))) {
+			printf("[HYRULE] Link feels a strange surge of power!\n");
 			hyrule_invincible = 1;
 			hyrule_update_status_nodes();
-			konami_index = 0;
+			h_idx = 0;
 		}
 	} else {
 		/* Reset if the sequence is broken, but allow starting over from the beginning if it matches the first step */
-		if (input == konami_code[0])
-			konami_index = 1;
+		if (input == h_seq[0])
+			h_idx = 1;
 		else
-			konami_index = 0;
+			h_idx = 0;
 	}
 }
 
@@ -184,7 +184,7 @@ hyrule_controller_read(struct cdev *dev, struct uio *uio, int ioflag)
 		return (EACCES);
 	}
 
-	check_konami_code(dir);
+	check_combo_seq(dir);
 
 	if (dir < 4) {
 		int nx = hyrule_get_prop_int("characters/link/location/x", 0) + controller_dx[dir];
@@ -248,7 +248,7 @@ hyrule_controller_write(struct cdev *dev, struct uio *uio, int ioflag)
 		return (EACCES);
 	}
 
-	check_konami_code(dir);
+	check_combo_seq(dir);
 
 	if (dir < 4) {
 		int nx = hyrule_get_prop_int("characters/link/location/x", 0) + controller_dx[dir];
