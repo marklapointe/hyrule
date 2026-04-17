@@ -1,0 +1,68 @@
+.Dd April 16, 2026
+.Dt HYRULE 4
+.Os
+.Sh NAME
+.Nm hyrule
+.Nd Hyrulian Kernel Interface
+.Sh SYNOPSIS
+To compile this driver into the kernel,
+place the following line in your
+kernel configuration file:
+.Bd -ragged -offset indent
+.Cd "device hyrule"
+.Ed
+.Pp
+Alternatively, to load the driver as a
+module at boot time, place the following line in
+.Xr loader.conf 5 :
+.Bd -ragged -offset indent
+.Cd "hyrule_load=\*qYES\*q"
+.Ed
+.Sh DESCRIPTION
+The
+.Nm
+module provides a virtual representation of the Land of Hyrule within the
+.Xr devfs 5
+filesystem.
+It creates a hierarchical structure under
+.Pa /dev/hyrule/
+allowing users to interact with characters, objects, and their properties through
+standard file operations.
+.Pp
+Characters and objects are organized as follows:
+.Pa /dev/hyrule/{type}/{name}/{category}/{property}
+.Pp
+Each property is a virtual file that can be read to get its current value or
+written to update it.
+.Sh FILES
+.Bl -tag -width ".Pa /dev/hyrule/help" -compact
+.It Pa /dev/hyrule/help
+A help device providing usage instructions.
+.It Pa /dev/hyrule/characters/
+Directory containing character data.
+.It Pa /dev/hyrule/objects/
+Directory containing object data.
+.El
+.Sh EXAMPLES
+To see the current status of Link's health:
+.Pp
+.Dl "cat /dev/hyrule/characters/link/stats/health"
+.Pp
+To equip Link with a new weapon:
+.Pp
+.Dl "echo 'Master Sword' > /dev/hyrule/characters/link/weapons/sword"
+.Sh SEE ALSO
+.Xr kldload 8 ,
+.Xr kldunload 8
+.Sh HISTORY
+The
+.Nm
+module first appeared in a silly experiment on FreeBSD 16.0.
+.Sh AUTHORS
+The
+.Nm
+module was written by
+.An Junie Aq .
+.Sh BUGS
+Watch out for Mobils and Ganon.
+A kernel panic may occur if you are not careful with the Triforce.
