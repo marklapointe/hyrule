@@ -6,11 +6,12 @@ sudo kldload ./hyrule.ko 2>/dev/null
 
 # Make sure cartridge is clean for consistent results
 echo "blow" > /dev/hyrule/console/cartridge
+echo 1 > /dev/hyrule/console/power
 
 # 1. Change some state
 echo "10" > /dev/hyrule/characters/link/stats/rupees
-echo "up" > /dev/hyrule/characters/link/location/move
-echo "right" > /dev/hyrule/characters/link/location/move
+cat /dev/hyrule/console/controller/down > /dev/null
+cat /dev/hyrule/console/controller/right > /dev/null
 
 # Check state before save
 R1=$(cat /dev/hyrule/characters/link/stats/rupees | tr -d '\n')
@@ -31,6 +32,8 @@ R2=$(cat /dev/hyrule/characters/link/stats/rupees | tr -d '\n')
 X2=$(cat /dev/hyrule/characters/link/location/x | tr -d '\n')
 Y2=$(cat /dev/hyrule/characters/link/location/y | tr -d '\n')
 echo "After Reset: Rupees=$R2, X=$X2, Y=$Y2"
+
+ls -l /dev/hyrule/game/load || echo "LOAD DEVICE MISSING!"
 
 # 4. Load
 cat game.sav > /dev/hyrule/game/load

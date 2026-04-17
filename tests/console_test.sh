@@ -27,7 +27,8 @@ fi
 
 # Test turning power on (should reset)
 echo "Changing health to 5 (will be reset when power turned on)..."
-# We need power on to change health
+# Clean cartridge and turn power on to change health
+echo "blow" > /dev/hyrule/console/cartridge
 echo 1 > /dev/hyrule/console/power
 echo 5 > /dev/hyrule/characters/link/stats/health
 echo "Health is now: $(cat /dev/hyrule/characters/link/stats/health)"

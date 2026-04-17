@@ -58,9 +58,51 @@ denoted by 'L'.
 .It Pa /dev/hyrule/world/map_config
 A configuration device for the 10x10 map grid. Lowercase characters represent
 accessible terrain, while uppercase characters represent blocked areas.
-.It Pa /dev/hyrule/characters/link/location/move
-A movement device for Link. Commands like "up", "down", "left", "right" or
-cardinal directions like "n", "s", "w", "e" can be written to this device.
+.It Pa /dev/hyrule/console/controller/
+A directory containing controller nodes (up, down, left, right, a, b).
+The directional devices (up, down, left, right) only appear if Link can move in that direction.
+Reading or writing to these devices will move Link. The 'a' and 'b' buttons are
+general-purpose action buttons that can be mapped to items.
+.It Pa /dev/hyrule/map/local/
+A dynamic directory containing nodes for local exploration. If Link is standing
+on an entrance (e.g., a Cave 'C', Shop 'S', or Dungeon '1-3'), a corresponding node (e.g.,
+.Pa cave ,
+.Pa shop ,
+or
+.Pa dungeon1 )
+will appear. Reading this node will move Link inside.
+.Pp
+Once inside a dungeon, several nodes appear:
+.Bl -tag -width ".Pa map/local/treasure" -compact
+.It Pa map/local/room
+Describes the current room.
+.It Pa map/local/next
+Moves Link to the next room in the dungeon.
+.It Pa map/local/prev
+Moves Link to the previous room.
+.It Pa map/local/treasure
+Found in room 4 of each dungeon. Reading this node grants a new weapon.
+.It Pa map/local/boss
+Found in room 9 of each dungeon. Defeating the boss grants a Triforce piece.
+.It Pa map/local/exit
+Allows returning to the world map (only available in the entrance room).
+.El
+.Pp
+Collecting Triforce pieces enables sword upgrades at the Upgrade Cave ('U'):
+.Bl -bullet -compact
+.It
+0 Triforces: Wooden Sword
+.It
+1 Triforce: White Sword
+.It
+2 Triforces: Master Sword
+.It
+3 Triforces: Access to Ganon's Castle ('G')
+.El
+.It Pa /dev/hyrule/characters/link/items/
+A directory containing Link's inventory. Items found in the world, such as the
+.Pa sword ,
+will appear here.
 .It Pa /dev/hyrule/characters/
 Directory containing character data (health, stamina, rupees).
 .It Pa /dev/hyrule/objects/
@@ -69,11 +111,16 @@ Directory containing object data (Triforce).
 .Sh EXAMPLES
 To see the current world map:
 .Pp
-.Dl "cat /dev/hyrule/map"
+.Dl "cat /dev/hyrule/map/view"
 .Pp
-To move Link north:
+To explore a cave when Link is at a 'C' location:
 .Pp
-.Dl "echo 'up' > /dev/hyrule/characters/link/location/move"
+.Dl "cat /dev/hyrule/map/local/cave"
+.Pp
+To equip and use the Sword:
+.Pp
+.Dl "echo 'characters/link/items/sword' > /dev/hyrule/console/controller/a"
+.Dl "cat /dev/hyrule/console/controller/a"
 .Pp
 To see the current status of Link's health:
 .Pp

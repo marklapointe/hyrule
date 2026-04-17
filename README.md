@@ -12,10 +12,14 @@ The `hyrule` module is a character device driver that creates a hierarchical str
 
 - **Hierarchical Device Tree**: Devices are organized by type and name, such as `/dev/hyrule/characters/link/stats/health`.
 - **Game Console Interface**: Manage the module via `/dev/hyrule/console/power` and `/dev/hyrule/console/reset`.
-- **Cartridge System**: Simulates hardware instability. If the cartridge is "dusty", the system may glitch or fail to power on. Use `echo blow > /dev/hyrule/console/cartridge` to fix it.
-- **Save & Load**: Persist your game state by reading from `/dev/hyrule/game/save` and writing back to `/dev/hyrule/game/load`. Includes robust validation to ensure kernel safety.
-- **Enhanced Map System**: A 10x10 grid of Hyrule accessible via `/dev/hyrule/map`. Track Link's position and explore fields, woods, and dungeons.
-- **Link's Movement**: Move Link around the map by writing commands like `up`, `down`, `left`, `right`, or cardinal directions (`n`, `s`, `e`, `w`) to `/dev/hyrule/characters/link/location/move`.
+- **Cartridge System**: Simulates hardware instability. Use `echo blow > /dev/hyrule/console/cartridge` to stabilize the system.
+- **Local Map Exploration**: Discover and enter caves, shops, and multi-room dungeons (Dungeon 1, 2, 3, and Ganon's Castle) via `/dev/hyrule/map/local/`.
+- **Dungeon Progression**: Fight bosses to collect Triforce pieces and find treasures like the Boomerang and Raft.
+- **Sword Upgrades**: Visit the Upgrade Cave to improve your sword (Wooden, White, Master Sword) as you collect Triforce pieces.
+- **Item Equipment**: Link can now find items like the `sword` and equip them to the Game Console controller's A and B buttons.
+- **Save & Load**: Persist your game state via `/dev/hyrule/game/save` and `/dev/hyrule/game/load`.
+- **Enhanced Map System**: A 10x10 grid accessible via `/dev/hyrule/map/view`, featuring detailed terrain and Link's position.
+- **Controller Interface**: Use the Game Console controller nodes in `/dev/hyrule/console/controller/` to interact. Directional nodes (`up`, `down`, `left`, `right`) appear dynamically when movement is possible. Action buttons (`a`, `b`) are always available.
 - **Map Configuration**: Customize the world map by writing a grid of characters to `/dev/hyrule/world/map_config`. Lowercase characters are accessible, while uppercase characters block Link's path.
 - **Character Stats**: Read and update attributes like health, stamina, magic, and rupees for characters like Link and Zelda.
 - **Manual Page**: Comprehensive documentation accessible via `man hyrule`.
@@ -68,7 +72,7 @@ cat /dev/hyrule/map
 
 Move Link east:
 ```bash
-echo "east" | sudo tee /dev/hyrule/characters/link/location/move
+cat /dev/hyrule/console/controller/right
 ```
 
 ### Save and Load

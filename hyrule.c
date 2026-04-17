@@ -92,6 +92,7 @@ hyrule_is_active(void)
 {
 	struct hyrule_prop *p;
 	long hp = 1;
+	int invincible = 0;
 
 	if (hyrule_power == 0)
 		return (0);
@@ -105,10 +106,14 @@ hyrule_is_active(void)
 	LIST_FOREACH(p, &prop_list, next) {
 		if (strcmp(p->name, "characters/link/stats/health") == 0) {
 			hp = strtol(p->value, NULL, 10);
-			break;
+		} else if (strcmp(p->name, "characters/link/status/invincible") == 0) {
+			invincible = strtol(p->value, NULL, 10);
 		}
 	}
 	mtx_unlock(&hyrule_mtx);
+
+	if (invincible)
+		return (1);
 
 	return (hp > 0);
 }
@@ -350,8 +355,11 @@ hyrule_write(struct cdev *dev, struct uio *uio, int ioflag)
 
 	sx_xlock(&hyrule_sx);
 
-	/* Only allow changes if power is on */
-	if (!hyrule_power && strcmp(p->name, "console/power") != 0) {
+	/* Only allow changes if power is on (except for console commands) */
+	if (!hyrule_power && 
+	    strcmp(p->name, "console/power") != 0 &&
+	    strcmp(p->name, "console/cartridge") != 0 &&
+	    strcmp(p->name, "console/reset") != 0) {
 		sx_xunlock(&hyrule_sx);
 		return (EACCES);
 	}
@@ -461,8 +469,8 @@ hyrule_save_read(struct cdev *dev, struct uio *uio, int ioflag)
 	mtx_lock(&hyrule_mtx);
 	LIST_FOREACH(p, &prop_list, next) {
 		if (strcmp(p->name, "help") == 0 ||
-		    strcmp(p->name, "map") == 0 ||
-		    strcmp(p->name, "characters/link/location/move") == 0 ||
+		    strncmp(p->name, "map/", 4) == 0 ||
+		    strncmp(p->name, "console/controller/", 19) == 0 ||
 		    strcmp(p->name, "console/reset") == 0 ||
 		    strcmp(p->name, "game/save") == 0 ||
 		    strcmp(p->name, "game/load") == 0)
@@ -619,6 +627,21 @@ add_hyrule_node_custom(const char *path, const char *initial_val, struct cdevsw 
 	return (0);
 }
 
+void
+remove_hyrule_node(struct hyrule_prop *p)
+{
+	if (p == NULL)
+		return;
+
+	mtx_lock(&hyrule_mtx);
+	LIST_REMOVE(p, next);
+	mtx_unlock(&hyrule_mtx);
+
+	if (p->cdev)
+		destroy_dev(p->cdev);
+	free(p, M_DEVBUF);
+}
+
 int
 add_hyrule_node(const char *path, const char *initial_val)
 {
@@ -637,6 +660,7 @@ hyrule_loader(struct module *mod, int cmd, void *arg)
 		sx_init(&hyrule_sx, "hyrule data lock");
 		
 		hyrule_map_init();
+		hyrule_input_init();
 
 		/* Console */
 		error = add_hyrule_node("console/power", "1\n");
@@ -649,20 +673,23 @@ hyrule_loader(struct module *mod, int cmd, void *arg)
 		/* Help device */
 		error = add_hyrule_node("help", 
 		    "Welcome to the Hyrule Kernel Module!\n\n"
-		    "Map display: cat /dev/hyrule/map\n"
+		    "Map display: cat /dev/hyrule/map/view\n"
 		    "World config: /dev/hyrule/world/map_config\n"
-		    "Move Link: echo 'up' > /dev/hyrule/characters/link/location/move\n"
-		    "Example: echo 'e' > /dev/hyrule/characters/link/location/move (to move east)\n\n"
+		    "Move Link: echo 'up' > /dev/hyrule/characters/link/location/controller\n"
+		    "Example: echo 'e' > /dev/hyrule/characters/link/location/controller (to move east)\n\n"
 		    "Be careful, it's dangerous to go alone!\n");
 		if (error) goto fail;
 
 		/* Map Devices */
-		error = add_hyrule_node_custom("map", "", &hyrule_map_cdevsw);
+		error = add_hyrule_node_custom("map/view", "", &hyrule_map_cdevsw);
 		if (error) goto fail;
 		error = add_hyrule_node_custom("world/map_config", "", &hyrule_map_config_cdevsw);
 		if (error) goto fail;
-		error = add_hyrule_node_custom("characters/link/location/move", "", &hyrule_move_cdevsw);
+		error = add_hyrule_node_custom("characters/link/location/controller", "", &hyrule_controller_cdevsw);
 		if (error) goto fail;
+		
+		hyrule_update_controller_nodes();
+
 		error = add_hyrule_node_custom("game/save", "", &hyrule_save_cdevsw);
 		if (error) goto fail;
 		error = add_hyrule_node_custom("game/load", "", &hyrule_load_cdevsw);
@@ -679,9 +706,15 @@ hyrule_loader(struct module *mod, int cmd, void *arg)
 		if (error) goto fail;
 		error = add_hyrule_node("characters/link/location/y", "0\n");
 		if (error) goto fail;
-		error = add_hyrule_node("characters/link/weapons/sword", "Master Sword\n");
+
+		/* Items */
+		error = add_hyrule_node("characters/link/items/sword", "None\n");
 		if (error) goto fail;
-		error = add_hyrule_node("characters/link/weapons/bow", "Hero's Bow\n");
+		error = add_hyrule_node("characters/link/stats/sword_level", "0\n");
+		if (error) goto fail;
+		error = add_hyrule_node("characters/link/items/bombs", "20\n");
+		if (error) goto fail;
+		error = add_hyrule_node("characters/link/items/bow", "Hero's Bow\n");
 		if (error) goto fail;
 
 		/* Zelda */
@@ -696,8 +729,24 @@ hyrule_loader(struct module *mod, int cmd, void *arg)
 		error = add_hyrule_node("characters/ganon/status/condition", "ALIVE\n");
 		if (error) goto fail;
 
+		/* Status */
+		error = add_hyrule_node("characters/link/status/invincible", "0\n");
+		if (error) goto fail;
+
 		/* Objects */
+		error = add_hyrule_node("objects/triforce/parts/collected", "0\n");
+		if (error) goto fail;
 		error = add_hyrule_node("objects/triforce/parts/courage", "Link\n");
+		if (error) goto fail;
+
+		/* World State */
+		error = add_hyrule_node("world/dungeon/bosses_defeated", "0\n");
+		if (error) goto fail;
+		error = add_hyrule_node("world/dungeon/treasures_found", "0\n");
+		if (error) goto fail;
+		error = add_hyrule_node("characters/link/location/dungeon", "0\n");
+		if (error) goto fail;
+		error = add_hyrule_node("characters/link/location/room", "0\n");
 		if (error) goto fail;
 
 		printf("[HYRULE] Hyrule is now mapped to /dev/hyrule/\n");

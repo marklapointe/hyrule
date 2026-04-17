@@ -2,6 +2,6 @@
 # Copyright (c) 2026, Mark LaPointe <mark@cloudbsd.org>
 
 KMOD=	hyrule
-SRCS=	hyrule.c hyrule_map.c
+SRCS=	hyrule.c hyrule_map.c hyrule_input.c
 
 .include <bsd.kmod.mk>

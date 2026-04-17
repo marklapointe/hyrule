@@ -7,9 +7,9 @@ This file tracks the active agents (characters) and their current state in the H
 ### Link
 - **Role**: Hero of Time / Protagonist
 - **Stats**: Health, Stamina, Rupees
-- **Properties**: Sword, Bow
-- **Location**: Dynamically tracked on the 10x10 Map (`/dev/hyrule/map`)
-- **Movements**: North, South, East, West (via `/dev/hyrule/characters/link/location/move`)
+- **Items**: Sword, Bow, Bombs
+- **Location**: Dynamically tracked on the 10x10 Map (`/dev/hyrule/map`). Can enter local landmarks like Caves 'C' and Shops 'S'.
+- **Controller**: Use directional nodes (`up`, `down`, `left`, `right`) and map items to action buttons (`a`, `b`) in `/dev/hyrule/console/controller/`.
 - **Special**: If health reaches 0, the game enters a "GAME OVER" state.
 
 ### Princess Zelda
