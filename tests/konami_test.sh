@@ -31,11 +31,11 @@ echo blow | sudo tee $DEV_ROOT/console/cartridge > /dev/null
 echo 1 | sudo tee $DEV_ROOT/console/power > /dev/null
 sleep 1
 
-# 4. Check initial invincibility
-echo "Checking initial invincibility status..."
-cat $DEV_ROOT/characters/link/status/invincible | grep "0" > /dev/null
-if [ $? -ne 0 ]; then
-    echo "FAIL: Link should not be invincible yet"
+# 4. Check initial invincibility status (should be invisible)
+echo "Checking initial invincibility status (should be invisible)..."
+ls $DEV_ROOT/characters/link/status/invincible 2>/dev/null
+if [ $? -eq 0 ]; then
+    echo "FAIL: Link status/invincible should not be visible yet"
     exit 1
 fi
 
@@ -100,6 +100,19 @@ echo "Verifying active status despite 0 HP..."
 cat $DEV_ROOT/map/view | grep "Hyrule Map" > /dev/null
 if [ $? -ne 0 ]; then
     echo "FAIL: Map should NOT show GAME OVER when invincible"
+    exit 1
+fi
+
+# 12. Reset system again
+echo "Resetting system again to verify invisibility..."
+echo 1 | sudo tee $DEV_ROOT/console/reset > /dev/null
+sleep 1
+
+# 13. Verify invisibility again
+echo "Verifying invincibility status is invisible again..."
+ls $DEV_ROOT/characters/link/status/invincible 2>/dev/null
+if [ $? -eq 0 ]; then
+    echo "FAIL: Link status/invincible should be invisible after reset"
     exit 1
 fi
 

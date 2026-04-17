@@ -86,7 +86,8 @@ check_konami_code(int input)
 		konami_index++;
 		if (konami_index == (sizeof(konami_code) / sizeof(konami_code[0]))) {
 			printf("[HYRULE] Konami Code Activated! Link is now invincible.\n");
-			hyrule_set_prop_int("characters/link/status/invincible", 1);
+			hyrule_invincible = 1;
+			hyrule_update_status_nodes();
 			konami_index = 0;
 		}
 	} else {

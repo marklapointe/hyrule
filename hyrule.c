@@ -54,6 +54,7 @@ static struct cdevsw hyrule_cdevsw;
 
 int hyrule_power = 1;
 int hyrule_cartridge = 0; /* Starts dusty */
+int hyrule_invincible = 0;
 
 int
 hyrule_get_prop_int(const char *name, int default_val)
@@ -92,28 +93,20 @@ hyrule_is_active(void)
 {
 	struct hyrule_prop *p;
 	long hp = 1;
-	int invincible = 0;
 
 	if (hyrule_power == 0)
 		return (0);
 
-	/* Random instability if cartridge is dusty */
-	if (hyrule_cartridge == 0 && (arc4random() % 100) < 30) {
-		return (0);
-	}
+	if (hyrule_invincible)
+		return (1);
 
 	mtx_lock(&hyrule_mtx);
 	LIST_FOREACH(p, &prop_list, next) {
 		if (strcmp(p->name, "characters/link/stats/health") == 0) {
 			hp = strtol(p->value, NULL, 10);
-		} else if (strcmp(p->name, "characters/link/status/invincible") == 0) {
-			invincible = strtol(p->value, NULL, 10);
 		}
 	}
 	mtx_unlock(&hyrule_mtx);
-
-	if (invincible)
-		return (1);
 
 	return (hp > 0);
 }
@@ -135,6 +128,8 @@ hyrule_reset(void)
 	}
 	mtx_unlock(&hyrule_mtx);
 
+	hyrule_invincible = 0;
+	hyrule_update_status_nodes();
 	hyrule_map_init();
 	
 	printf("[HYRULE] System Reset. Welcome back!\n");
@@ -274,8 +269,6 @@ hyrule_read(struct cdev *dev, struct uio *uio, int ioflag)
 		const char *msg;
 		if (hyrule_power == 0)
 			msg = "POWER OFF\n";
-		else if (hyrule_cartridge == 0)
-			msg = "GRAPHICS GLITCH - PLEASE BLOW ON CARTRIDGE\n";
 		else
 			msg = "GAME OVER\n";
 		
@@ -312,12 +305,29 @@ hyrule_update_prop_state(struct hyrule_prop *p, int loading)
 				/* 80% chance to fail to turn on if dusty */
 				if (hyrule_cartridge == 0 && (arc4random() % 100) < 80) {
 					printf("[HYRULE] Power-on failed. Red light blinking. Cartridge dusty?\n");
+					strlcpy(p->value, "0\n", sizeof(p->value));
 					return;
 				}
 				hyrule_reset();
 			}
 			hyrule_power = new_power;
 			printf("[HYRULE] Power set to %d\n", hyrule_power);
+			if (hyrule_power == 0 && !loading) {
+				/* 50% chance to become dusty when turned off (the gamble) */
+				if ((arc4random() % 100) < 50) {
+					hyrule_cartridge = 0;
+					struct hyrule_prop *cp;
+					mtx_lock(&hyrule_mtx);
+					LIST_FOREACH(cp, &prop_list, next) {
+						if (strcmp(cp->name, "console/cartridge") == 0) {
+							strlcpy(cp->value, "dusty\n", sizeof(cp->value));
+							break;
+						}
+					}
+					mtx_unlock(&hyrule_mtx);
+					printf("[HYRULE] Cartridge is now dusty after power cycle.\n");
+				}
+			}
 		}
 	} else if (strcmp(p->name, "console/reset") == 0) {
 		if (strtol(p->value, NULL, 10) == 1) {
@@ -340,7 +350,53 @@ hyrule_update_prop_state(struct hyrule_prop *p, int loading)
 		if (hp <= 0) {
 			printf("[HYRULE] Link has no life left! GAME OVER.\n");
 		}
+	} else if (strcmp(p->name, "characters/link/status/invincible") == 0) {
+		int new_invincible = strtol(p->value, NULL, 10);
+		if (new_invincible != hyrule_invincible) {
+			hyrule_invincible = new_invincible;
+			hyrule_update_status_nodes();
+		}
 	}
+}
+
+static struct task status_update_task;
+static struct hyrule_prop *invincible_node = NULL;
+
+static void
+hyrule_update_status_nodes_task(void *context, int pending)
+{
+	struct hyrule_prop *to_remove = NULL;
+
+	sx_xlock(&hyrule_sx);
+	if (hyrule_invincible) {
+		if (invincible_node == NULL) {
+			add_hyrule_node("characters/link/status/invincible", "1\n");
+			struct hyrule_prop *p;
+			mtx_lock(&hyrule_mtx);
+			LIST_FOREACH(p, &prop_list, next) {
+				if (strcmp(p->name, "characters/link/status/invincible") == 0) {
+					invincible_node = p;
+					break;
+				}
+			}
+			mtx_unlock(&hyrule_mtx);
+		}
+	} else {
+		if (invincible_node != NULL) {
+			to_remove = invincible_node;
+			invincible_node = NULL;
+		}
+	}
+	sx_xunlock(&hyrule_sx);
+
+	if (to_remove != NULL)
+		remove_hyrule_node(to_remove);
+}
+
+void
+hyrule_update_status_nodes(void)
+{
+	taskqueue_enqueue(taskqueue_thread, &status_update_task);
 }
 
 int
@@ -415,7 +471,8 @@ hyrule_validate_save(const char *buf, size_t total_len)
 
 		/* Validate property existence */
 		int found = 0;
-		if (strcmp(tmp_name, "world/map_config") == 0) {
+		if (strcmp(tmp_name, "world/map_config") == 0 ||
+		    strcmp(tmp_name, "characters/link/status/invincible") == 0) {
 			found = 1;
 		} else {
 			struct hyrule_prop *prop;
@@ -549,6 +606,9 @@ hyrule_load_write(struct cdev *dev, struct uio *uio, int ioflag)
 
 					if (strcmp(name, "world/map_config") == 0) {
 						hyrule_map_set_config(val_str, val_len);
+					} else if (strcmp(name, "characters/link/status/invincible") == 0) {
+						hyrule_invincible = strtol(val_str, NULL, 10);
+						hyrule_update_status_nodes();
 					} else {
 						struct hyrule_prop *prop;
 						mtx_lock(&hyrule_mtx);
@@ -662,6 +722,8 @@ hyrule_loader(struct module *mod, int cmd, void *arg)
 		hyrule_map_init();
 		hyrule_input_init();
 
+		TASK_INIT(&status_update_task, 0, hyrule_update_status_nodes_task, NULL);
+
 		/* Console */
 		error = add_hyrule_node("console/power", "1\n");
 		if (error) goto fail;
@@ -730,8 +792,7 @@ hyrule_loader(struct module *mod, int cmd, void *arg)
 		if (error) goto fail;
 
 		/* Status */
-		error = add_hyrule_node("characters/link/status/invincible", "0\n");
-		if (error) goto fail;
+		hyrule_update_status_nodes();
 
 		/* Objects */
 		error = add_hyrule_node("objects/triforce/parts/collected", "0\n");

@@ -64,6 +64,7 @@ extern struct sx hyrule_sx;
 extern LIST_HEAD(prop_head, hyrule_prop) prop_list;
 extern int hyrule_power;
 extern int hyrule_cartridge;
+extern int hyrule_invincible;
 
 /* Shared device operations */
 d_open_t  hyrule_open;
@@ -102,6 +103,7 @@ void hyrule_map_get_config(char *buf, size_t size);
 void hyrule_map_set_config(const char *input, size_t len);
 void hyrule_update_controller_nodes(void);
 void hyrule_update_local_nodes(void);
+void hyrule_update_status_nodes(void);
 
 /* Input logic in hyrule_input.c */
 void hyrule_input_init(void);
