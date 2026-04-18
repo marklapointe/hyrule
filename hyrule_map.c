@@ -45,13 +45,13 @@ static char worldMap[MAP_SIZE][MAP_SIZE];
 static char worldEntrances[MAP_SIZE][MAP_SIZE];
 
 /* Local nodes under /dev/hyrule/map/local/ */
-static struct hyruleProp *localEntranceNode = NULL;
-static struct hyruleProp *localExitNode = NULL;
-static struct hyruleProp *localNextNode = NULL;
-static struct hyruleProp *localPrevNode = NULL;
-static struct hyruleProp *localTreasureNode = NULL;
-static struct hyruleProp *localBossNode = NULL;
-static struct hyruleProp *localRoomNode = NULL;
+static struct hyruleProperty *localEntranceNode = NULL;
+static struct hyruleProperty *localExitNode = NULL;
+static struct hyruleProperty *localNextNode = NULL;
+static struct hyruleProperty *localPrevNode = NULL;
+static struct hyruleProperty *localTreasureNode = NULL;
+static struct hyruleProperty *localBossNode = NULL;
+static struct hyruleProperty *localRoomNode = NULL;
 
 /* State tracking for internal locations */
 static int insideEntrance = 0;
@@ -65,7 +65,7 @@ static d_read_t hyruleLocalRead;
 static d_write_t hyruleLocalWrite;
 static d_close_t hyruleLocalClose;
 
-struct cdevsw hyruleLocalCdevsw = {
+struct cdevsw hyruleLocalCharacterDeviceSwitch = {
 	.d_version = D_VERSION,
 	.d_open = hyruleOpen,
 	.d_close = hyruleLocalClose,
@@ -75,7 +75,7 @@ struct cdevsw hyruleLocalCdevsw = {
 };
 
 static d_read_t hyruleMapRead;
-struct cdevsw hyruleMapCdevsw = {
+struct cdevsw hyruleMapCharacterDeviceSwitch = {
 	.d_version = D_VERSION,
 	.d_open = hyruleOpen,
 	.d_close = hyruleClose,
@@ -93,7 +93,7 @@ struct cdevsw hyruleMapCdevsw = {
 
 static d_read_t hyruleMapConfigRead;
 static d_write_t hyruleMapConfigWrite;
-struct cdevsw hyruleMapConfigCdevsw = {
+struct cdevsw hyruleMapConfigCharacterDeviceSwitch = {
 	.d_version = D_VERSION,
 	.d_open = hyruleOpen,
 	.d_close = hyruleClose,
@@ -123,152 +123,170 @@ static char getMapSymbol(char type);
 static void
 hyruleUpdateLocalNodesTask(void *context, int pending)
 {
-	struct hyruleProp *toRemove[16] = { NULL };
-	int trIdx = 0;
+	struct hyruleProperty *nodesToRemove[16] = { NULL };
+	int removalIndex = 0;
 
-	sx_xlock(&hyruleSx);
-	int x = hyruleGetPropInt("characters/link/location/x", 0);
-	int y = hyruleGetPropInt("characters/link/location/y", 0);
-	char entrance = 0;
+	/* 
+	 * Acquire an exclusive lock because we may be adding or removing 
+	 * property nodes based on the current player location.
+	 */
+	sx_xlock(&hyruleSharedExclusion);
+	int playerX = hyruleGetPropInt("characters/link/location/x", 0);
+	int playerY = hyruleGetPropInt("characters/link/location/y", 0);
+	char entranceType = 0;
 
-	if (x >= 0 && x < MAP_SIZE && y >= 0 && y < MAP_SIZE)
-		entrance = worldEntrances[y][x];
+	/* Determine if the player is currently standing on an entrance. */
+	if (playerX >= 0 && playerX < MAP_SIZE && playerY >= 0 && playerY < MAP_SIZE)
+		entranceType = worldEntrances[playerY][playerX];
 
+	/* If the player has entered a building or dungeon... */
 	if (insideEntrance) {
+		/* Remove the entrance node as we are now 'inside'. */
 		if (localEntranceNode != NULL) {
-			toRemove[trIdx++] = localEntranceNode;
+			nodesToRemove[removalIndex++] = localEntranceNode;
 			localEntranceNode = NULL;
 		}
 
-		int dungeon = hyruleGetPropInt("characters/link/location/dungeon", 0);
-		int room = hyruleGetPropInt("characters/link/location/room", 0);
+		int dungeonId = hyruleGetPropInt("characters/link/location/dungeon", 0);
+		int roomId = hyruleGetPropInt("characters/link/location/room", 0);
 
-		if (room == 0) {
+		/* If in the first room (entrance), provide an 'exit' node. */
+		if (roomId == 0) {
 			if (localExitNode == NULL) {
-				addHyruleNodeCustom("map/local/exit", "", &hyruleLocalCdevsw);
-				struct hyruleProp *p;
-				mtx_lock(&hyruleMtx);
-				LIST_FOREACH(p, &propList, next) {
-					if (strcmp(p->name, "map/local/exit") == 0) {
-						localExitNode = p;
+				addHyrulePropertyNodeCustom("map/local/exit", "", &hyruleLocalCharacterDeviceSwitch);
+				struct hyruleProperty *property;
+				mtx_lock(&hyruleMutex);
+				LIST_FOREACH(property, &propertyList, next) {
+					if (strcmp(property->name, "map/local/exit") == 0) {
+						localExitNode = property;
 						break;
 					}
 				}
-				mtx_unlock(&hyruleMtx);
+				mtx_unlock(&hyruleMutex);
 			}
 		} else {
+			/* Otherwise, hide the exit node. */
 			if (localExitNode != NULL) {
-				toRemove[trIdx++] = localExitNode;
+				nodesToRemove[removalIndex++] = localExitNode;
 				localExitNode = NULL;
 			}
 		}
 
-		if (dungeon > 0) {
+		/* Dungeon specific navigation nodes. */
+		if (dungeonId > 0) {
+			/* Provide a node to check current room status. */
 			if (localRoomNode == NULL) {
-				addHyruleNodeCustom("map/local/room", "", &hyruleLocalCdevsw);
-				struct hyruleProp *p;
-				mtx_lock(&hyruleMtx);
-				LIST_FOREACH(p, &propList, next) {
-					if (strcmp(p->name, "map/local/room") == 0) {
-						localRoomNode = p;
+				addHyrulePropertyNodeCustom("map/local/room", "", &hyruleLocalCharacterDeviceSwitch);
+				struct hyruleProperty *property;
+				mtx_lock(&hyruleMutex);
+				LIST_FOREACH(property, &propertyList, next) {
+					if (strcmp(property->name, "map/local/room") == 0) {
+						localRoomNode = property;
 						break;
 					}
 				}
-				mtx_unlock(&hyruleMtx);
+				mtx_unlock(&hyruleMutex);
 			}
 
-			if (room < 9) {
+			/* Provide 'next' node if not at the end of the dungeon. */
+			if (roomId < 9) {
 				if (localNextNode == NULL) {
-					addHyruleNodeCustom("map/local/next", "", &hyruleLocalCdevsw);
-					struct hyruleProp *p;
-					mtx_lock(&hyruleMtx);
-					LIST_FOREACH(p, &propList, next) {
-						if (strcmp(p->name, "map/local/next") == 0) {
-							localNextNode = p;
+					addHyrulePropertyNodeCustom("map/local/next", "", &hyruleLocalCharacterDeviceSwitch);
+					struct hyruleProperty *property;
+					mtx_lock(&hyruleMutex);
+					LIST_FOREACH(property, &propertyList, next) {
+						if (strcmp(property->name, "map/local/next") == 0) {
+							localNextNode = property;
 							break;
 						}
 					}
-					mtx_unlock(&hyruleMtx);
+					mtx_unlock(&hyruleMutex);
 				}
 			} else {
 				if (localNextNode != NULL) {
-					toRemove[trIdx++] = localNextNode;
+					nodesToRemove[removalIndex++] = localNextNode;
 					localNextNode = NULL;
 				}
 			}
 
-			if (room > 0) {
+			/* Provide 'prev' node if not at the entrance. */
+			if (roomId > 0) {
 				if (localPrevNode == NULL) {
-					addHyruleNodeCustom("map/local/prev", "", &hyruleLocalCdevsw);
-					struct hyruleProp *p;
-					mtx_lock(&hyruleMtx);
-					LIST_FOREACH(p, &propList, next) {
-						if (strcmp(p->name, "map/local/prev") == 0) {
-							localPrevNode = p;
+					addHyrulePropertyNodeCustom("map/local/prev", "", &hyruleLocalCharacterDeviceSwitch);
+					struct hyruleProperty *property;
+					mtx_lock(&hyruleMutex);
+					LIST_FOREACH(property, &propertyList, next) {
+						if (strcmp(property->name, "map/local/prev") == 0) {
+							localPrevNode = property;
 							break;
 						}
 					}
-					mtx_unlock(&hyruleMtx);
+					mtx_unlock(&hyruleMutex);
 				}
 			} else {
 				if (localPrevNode != NULL) {
-					toRemove[trIdx++] = localPrevNode;
+					nodesToRemove[removalIndex++] = localPrevNode;
 					localPrevNode = NULL;
 				}
 			}
 		}
 	} else {
-		if (localExitNode != NULL) toRemove[trIdx++] = localExitNode; localExitNode = NULL;
-		if (localNextNode != NULL) toRemove[trIdx++] = localNextNode; localNextNode = NULL;
-		if (localPrevNode != NULL) toRemove[trIdx++] = localPrevNode; localPrevNode = NULL;
-		if (localTreasureNode != NULL) toRemove[trIdx++] = localTreasureNode; localTreasureNode = NULL;
-		if (localBossNode != NULL) toRemove[trIdx++] = localBossNode; localBossNode = NULL;
-		if (localRoomNode != NULL) toRemove[trIdx++] = localRoomNode; localRoomNode = NULL;
+		/* Player is on the world map. Remove all internal navigation nodes. */
+		if (localExitNode != NULL) nodesToRemove[removalIndex++] = localExitNode; localExitNode = NULL;
+		if (localNextNode != NULL) nodesToRemove[removalIndex++] = localNextNode; localNextNode = NULL;
+		if (localPrevNode != NULL) nodesToRemove[removalIndex++] = localPrevNode; localPrevNode = NULL;
+		if (localTreasureNode != NULL) nodesToRemove[removalIndex++] = localTreasureNode; localTreasureNode = NULL;
+		if (localBossNode != NULL) nodesToRemove[removalIndex++] = localBossNode; localBossNode = NULL;
+		if (localRoomNode != NULL) nodesToRemove[removalIndex++] = localRoomNode; localRoomNode = NULL;
 
-		if (entrance != 0) {
-			char path[64];
-			const char *ename;
-			switch (entrance) {
-				case 'c': ename = "cave"; break;
-				case 's': ename = "shop"; break;
-				case '1': ename = "dungeon1"; break;
-				case '2': ename = "dungeon2"; break;
-				case '3': ename = "dungeon3"; break;
-				case 'g': ename = "ganon"; break;
-				case 'u': ename = "upgrade"; break;
-				default: ename = "entrance"; break;
+		/* If standing on an entrance, create the entrance device node. */
+		if (entranceType != 0) {
+			char entrancePath[64];
+			const char *entranceName;
+			switch (entranceType) {
+				case 'c': entranceName = "cave"; break;
+				case 's': entranceName = "shop"; break;
+				case '1': entranceName = "dungeon1"; break;
+				case '2': entranceName = "dungeon2"; break;
+				case '3': entranceName = "dungeon3"; break;
+				case 'g': entranceName = "ganon"; break;
+				case 'u': entranceName = "upgrade"; break;
+				default: entranceName = "entrance"; break;
 			}
-			snprintf(path, sizeof(path), "map/local/%s", ename);
+			snprintf(entrancePath, sizeof(entrancePath), "map/local/%s", entranceName);
 
-			if (localEntranceNode == NULL || strcmp(localEntranceNode->name, path) != 0) {
+			/* Update the entrance node if it has changed. */
+			if (localEntranceNode == NULL || strcmp(localEntranceNode->name, entrancePath) != 0) {
 				if (localEntranceNode != NULL) {
-					toRemove[trIdx++] = localEntranceNode;
+					nodesToRemove[removalIndex++] = localEntranceNode;
 					localEntranceNode = NULL;
 				}
-				addHyruleNodeCustom(path, "", &hyruleLocalCdevsw);
-				struct hyruleProp *p;
-				mtx_lock(&hyruleMtx);
-				LIST_FOREACH(p, &propList, next) {
-					if (strcmp(p->name, path) == 0) {
-						localEntranceNode = p;
+				addHyrulePropertyNodeCustom(entrancePath, "", &hyruleLocalCharacterDeviceSwitch);
+				struct hyruleProperty *property;
+				mtx_lock(&hyruleMutex);
+				LIST_FOREACH(property, &propertyList, next) {
+					if (strcmp(property->name, entrancePath) == 0) {
+						localEntranceNode = property;
 						break;
 					}
 				}
-				mtx_unlock(&hyruleMtx);
-				strlcpy(currentEntranceType, ename, sizeof(currentEntranceType));
+				mtx_unlock(&hyruleMutex);
+				strlcpy(currentEntranceType, entranceName, sizeof(currentEntranceType));
 			}
 		} else {
+			/* Not on an entrance, clear the node. */
 			if (localEntranceNode != NULL) {
-				toRemove[trIdx++] = localEntranceNode;
+				nodesToRemove[removalIndex++] = localEntranceNode;
 				localEntranceNode = NULL;
 			}
 		}
 	}
-	sx_xunlock(&hyruleSx);
+	sx_xunlock(&hyruleSharedExclusion);
 
-	for (int i = 0; i < trIdx; i++) {
-		if (toRemove[i] != NULL)
-			removeHyruleNode(toRemove[i]);
+	/* Safely remove nodes outside of the lock. */
+	for (int i = 0; i < removalIndex; i++) {
+		if (nodesToRemove[i] != NULL)
+			removeHyrulePropertyNode(nodesToRemove[i]);
 	}
 }
 
@@ -279,103 +297,113 @@ hyruleUpdateLocalNodes(void)
 }
 
 static int
-hyruleLocalRead(struct cdev *dev, struct uio *uio, int ioflag)
+hyruleLocalRead(struct cdev *dev, struct uio *userIo, int ioflag)
 {
-	struct hyruleProp *p = dev->si_drv1;
-	char msg[512] = "";
-	int msgLen;
+	struct hyruleProperty *property = dev->si_drv1;
+	char message[512] = "";
+	int messageLength;
 
-	if (uio->uio_offset > 0)
+	/* Only allow reading from the start of the 'file'. */
+	if (userIo->uio_offset > 0)
 		return (0);
 
-	sx_xlock(&hyruleSx);
+	sx_xlock(&hyruleSharedExclusion);
+	/* Generic check for active system status. */
 	if (!hyruleIsActive()) {
-		sx_xunlock(&hyruleSx);
+		sx_xunlock(&hyruleSharedExclusion);
 		return (EACCES);
 	}
 
-	if (p == localEntranceNode) {
+	/* Logic for interacting with dynamic local nodes. */
+	if (property == localEntranceNode) {
 		if (strcmp(currentEntranceType, "cave") == 0) {
 			int hasSword = 0;
-			struct hyruleProp *item;
+			struct hyruleProperty *itemProperty;
 			
-			snprintf(msg, sizeof(msg), "Old Knight: IT'S DANGEROUS TO GO ALONE! TAKE THIS. You received the WOODEN SWORD!\n");
+			snprintf(message, sizeof(message), "Old Knight: IT'S DANGEROUS TO GO ALONE! TAKE THIS. You received the WOODEN SWORD!\n");
 			
-			mtx_lock(&hyruleMtx);
-			LIST_FOREACH(item, &propList, next) {
-				if (strcmp(item->name, "characters/link/items/sword") == 0) {
-					if (strcmp(item->value, "None\n") != 0) {
+			mtx_lock(&hyruleMutex);
+			LIST_FOREACH(itemProperty, &propertyList, next) {
+				if (strcmp(itemProperty->name, "characters/link/items/sword") == 0) {
+					if (strcmp(itemProperty->value, "None\n") != 0) {
 						hasSword = 1;
 					} else {
-						strlcpy(item->value, "Wooden Sword\n", sizeof(item->value));
+						strlcpy(itemProperty->value, "Wooden Sword\n", sizeof(itemProperty->value));
 						hasSword = 1;
 					}
 					break;
 				}
 			}
-			mtx_unlock(&hyruleMtx);
+			mtx_unlock(&hyruleMutex);
 
+			/* If the sword node doesn't exist for some reason, create it. */
 			if (!hasSword) {
-				addHyruleNode("characters/link/items/sword", "Wooden Sword\n");
+				addHyrulePropertyNode("characters/link/items/sword", "Wooden Sword\n");
 			}
 			hyruleSetPropInt("characters/link/stats/sword_level", 0);
 			insideEntrance = 1;
 		} else {
-			snprintf(msg, sizeof(msg), "Entering %s...\n", currentEntranceType);
+			snprintf(message, sizeof(message), "Entering %s...\n", currentEntranceType);
 			insideEntrance = 1;
 		}
-	} else if (p == localExitNode) {
+	} else if (property == localExitNode) {
 		insideEntrance = 0;
 		hyruleSetPropInt("characters/link/location/dungeon", 0);
 		hyruleSetPropInt("characters/link/location/room", 0);
-		snprintf(msg, sizeof(msg), "Exiting to the world map...\n");
-	} else if (p == localRoomNode) {
-		int dungeon = hyruleGetPropInt("characters/link/location/dungeon", 0);
-		int room = hyruleGetPropInt("characters/link/location/room", 0);
-		snprintf(msg, sizeof(msg), "Dungeon %d, Room %d\n", dungeon, room);
-	} else if (p == localNextNode) {
-		int room = hyruleGetPropInt("characters/link/location/room", 0);
-		if (room < 9) {
-			room++;
-			hyruleSetPropInt("characters/link/location/room", room);
-			snprintf(msg, sizeof(msg), "Moving forward to room %d...\n", room);
+		snprintf(message, sizeof(message), "Exiting to the world map...\n");
+	} else if (property == localRoomNode) {
+		int dungeonId = hyruleGetPropInt("characters/link/location/dungeon", 0);
+		int roomId = hyruleGetPropInt("characters/link/location/room", 0);
+		snprintf(message, sizeof(message), "Dungeon %d, Room %d\n", dungeonId, roomId);
+	} else if (property == localNextNode) {
+		int roomId = hyruleGetPropInt("characters/link/location/room", 0);
+		if (roomId < 9) {
+			roomId++;
+			hyruleSetPropInt("characters/link/location/room", roomId);
+			snprintf(message, sizeof(message), "Moving forward to room %d...\n", roomId);
 		}
-	} else if (p == localPrevNode) {
-		int room = hyruleGetPropInt("characters/link/location/room", 0);
-		if (room > 0) {
-			room--;
-			hyruleSetPropInt("characters/link/location/room", room);
-			snprintf(msg, sizeof(msg), "Moving back to room %d...\n", room);
+	} else if (property == localPrevNode) {
+		int roomId = hyruleGetPropInt("characters/link/location/room", 0);
+		if (roomId > 0) {
+			roomId--;
+			hyruleSetPropInt("characters/link/location/room", roomId);
+			snprintf(message, sizeof(message), "Moving back to room %d...\n", roomId);
 		}
 	}
 
-	sx_xunlock(&hyruleSx);
+	sx_xunlock(&hyruleSharedExclusion);
 	
-	msgLen = strlen(msg);
-	uiomove(msg, msgLen, uio);
+	/* Copy the resulting interaction message to userspace. */
+	messageLength = strlen(message);
+	uiomove(message, messageLength, userIo);
 	
 	return (0);
 }
 
 static int
-hyruleLocalWrite(struct cdev *dev, struct uio *uio, int ioflag)
+hyruleLocalWrite(struct cdev *dev, struct uio *userIo, int ioflag)
 {
-	struct hyruleProp *p = dev->si_drv1;
+	struct hyruleProperty *property = dev->si_drv1;
 
-	sx_xlock(&hyruleSx);
+	/* 
+	 * Acquire an exclusive lock to modify internal state.
+	 */
+	sx_xlock(&hyruleSharedExclusion);
 	if (!hyruleIsActive()) {
-		sx_xunlock(&hyruleSx);
+		sx_xunlock(&hyruleSharedExclusion);
 		return (EACCES);
 	}
 
-	if (p == localEntranceNode) {
+	/* Simple toggle logic for entering/exiting via write. */
+	if (property == localEntranceNode) {
 		insideEntrance = 1;
-	} else if (p == localExitNode) {
+	} else if (property == localExitNode) {
 		insideEntrance = 0;
 	}
 
-	sx_xunlock(&hyruleSx);
-	uio->uio_resid = 0;
+	sx_xunlock(&hyruleSharedExclusion);
+	/* Consume the user input (discarding data but marking it as 'processed'). */
+	userIo->uio_resid = 0;
 	return (0);
 }
 
@@ -418,153 +446,176 @@ hyruleMapIsAccessible(int x, int y)
 }
 
 static int
-hyruleMapRead(struct cdev *dev, struct uio *uio, int ioflag)
+hyruleMapRead(struct cdev *dev, struct uio *userIo, int ioflag)
 {
-	char buf[1536];
-	int pos = 0;
-	int x, y;
+	char displayBuffer[1536];
+	int currentPosition = 0;
+	int mapX, mapY;
 
-	sx_slock(&hyruleSx);
+	/* 
+	 * Use a shared lock to read the current world map state.
+	 */
+	sx_slock(&hyruleSharedExclusion);
 
+	/* Check if the map should be 'visible' based on power/health. */
 	if (!hyruleIsActive()) {
-		const char *msg = (hyrulePower == 0) ? "POWER OFF\n" : "GAME OVER\n";
-		int msgLen = strlen(msg);
-		if (uio->uio_offset >= msgLen) {
-			sx_sunlock(&hyruleSx);
+		const char *message = (hyrulePower == 0) ? "POWER OFF\n" : "GAME OVER\n";
+		int messageLength = strlen(message);
+		if (userIo->uio_offset >= messageLength) {
+			sx_sunlock(&hyruleSharedExclusion);
 			return (0);
 		}
-		int error = uiomove(__DECONST(char *, msg) + uio->uio_offset, msgLen - uio->uio_offset, uio);
-		sx_sunlock(&hyruleSx);
+		int error = uiomove(__DECONST(char *, message) + userIo->uio_offset, messageLength - userIo->uio_offset, userIo);
+		sx_sunlock(&hyruleSharedExclusion);
 		return (error);
 	}
 
-	int lx = hyruleGetPropInt("characters/link/location/x", 0);
-	int ly = hyruleGetPropInt("characters/link/location/y", 0);
+	/* Get player coordinates for 'L' marker. */
+	int playerX = hyruleGetPropInt("characters/link/location/x", 0);
+	int playerY = hyruleGetPropInt("characters/link/location/y", 0);
 
-	pos += snprintf(buf + pos, sizeof(buf) - pos, "--- Hyrule Map ---\n");
-	for (y = 0; y < MAP_SIZE; y++) {
-		for (x = 0; x < MAP_SIZE; x++) {
-			pos += snprintf(buf + pos, sizeof(buf) - pos, "+---");
+	/* Build the ASCII map in our local buffer. */
+	currentPosition += snprintf(displayBuffer + currentPosition, sizeof(displayBuffer) - currentPosition, "--- Hyrule Map ---\n");
+	for (mapY = 0; mapY < MAP_SIZE; mapY++) {
+		for (mapX = 0; mapX < MAP_SIZE; mapX++) {
+			currentPosition += snprintf(displayBuffer + currentPosition, sizeof(displayBuffer) - currentPosition, "+---");
 		}
-		pos += snprintf(buf + pos, sizeof(buf) - pos, "+\n");
-		for (x = 0; x < MAP_SIZE; x++) {
-			if (x == lx && y == ly)
-				pos += snprintf(buf + pos, sizeof(buf) - pos, "| L ");
+		currentPosition += snprintf(displayBuffer + currentPosition, sizeof(displayBuffer) - currentPosition, "+\n");
+		for (mapX = 0; mapX < MAP_SIZE; mapX++) {
+			if (mapX == playerX && mapY == playerY)
+				currentPosition += snprintf(displayBuffer + currentPosition, sizeof(displayBuffer) - currentPosition, "| L ");
 			else
-				pos += snprintf(buf + pos, sizeof(buf) - pos, "| %c ", getMapSymbol(worldMap[y][x]));
+				currentPosition += snprintf(displayBuffer + currentPosition, sizeof(displayBuffer) - currentPosition, "| %c ", getMapSymbol(worldMap[mapY][mapX]));
 		}
-		pos += snprintf(buf + pos, sizeof(buf) - pos, "|\n");
+		currentPosition += snprintf(displayBuffer + currentPosition, sizeof(displayBuffer) - currentPosition, "|\n");
 	}
-	for (x = 0; x < MAP_SIZE; x++) {
-		pos += snprintf(buf + pos, sizeof(buf) - pos, "+---");
+	for (mapX = 0; mapX < MAP_SIZE; mapX++) {
+		currentPosition += snprintf(displayBuffer + currentPosition, sizeof(displayBuffer) - currentPosition, "+---");
 	}
-	pos += snprintf(buf + pos, sizeof(buf) - pos, "+\n");
+	currentPosition += snprintf(displayBuffer + currentPosition, sizeof(displayBuffer) - currentPosition, "+\n");
 
-	if (uio->uio_offset >= pos) {
-		sx_sunlock(&hyruleSx);
+	/* Return EOF if user has read past the map. */
+	if (userIo->uio_offset >= currentPosition) {
+		sx_sunlock(&hyruleSharedExclusion);
 		return (0);
 	}
 
-	int error = uiomove(buf + uio->uio_offset, pos - uio->uio_offset, uio);
-	sx_sunlock(&hyruleSx);
+	/* Move the ASCII map from kernel to userspace. */
+	int error = uiomove(displayBuffer + userIo->uio_offset, currentPosition - userIo->uio_offset, userIo);
+	sx_sunlock(&hyruleSharedExclusion);
 	return (error);
 }
 
 void
-hyruleMapGetConfig(char *buf, size_t size)
+hyruleMapGetConfig(char *buffer, size_t size)
 {
-	int x, y, pos = 0;
-	for (y = 0; y < MAP_SIZE; y++) {
-		for (x = 0; x < MAP_SIZE; x++) {
-			if (pos < size - 1)
-				buf[pos++] = worldMap[y][x];
+	int mapX, mapY, currentPosition = 0;
+	/* 
+	 * Flatten the 2D world map into a single string for configuration Export.
+	 */
+	for (mapY = 0; mapY < MAP_SIZE; mapY++) {
+		for (mapX = 0; mapX < MAP_SIZE; mapX++) {
+			if (currentPosition < size - 1)
+				buffer[currentPosition++] = worldMap[mapY][mapX];
 		}
-		if (pos < size - 1)
-			buf[pos++] = '\n';
+		if (currentPosition < size - 1)
+			buffer[currentPosition++] = '\n';
 	}
-	buf[pos] = '\0';
+	buffer[currentPosition] = '\0';
 }
 
 void
-hyruleMapSetConfig(const char *input, size_t len)
+hyruleMapSetConfig(const char *input, size_t length)
 {
-	int x = 0, y = 0, i;
-	for (i = 0; i < len && y < MAP_SIZE; i++) {
+	int mapX = 0, mapY = 0, i;
+	/* 
+	 * Parse the input string and update the 2D world map. 
+	 * We ignore whitespace during parsing.
+	 */
+	for (i = 0; i < length && mapY < MAP_SIZE; i++) {
 		if (isspace(input[i])) continue;
-		worldMap[y][x] = input[i];
-		x++;
-		if (x >= MAP_SIZE) {
-			x = 0;
-			y++;
+		worldMap[mapY][mapX] = input[i];
+		mapX++;
+		if (mapX >= MAP_SIZE) {
+			mapX = 0;
+			mapY++;
 		}
 	}
+	/* Refresh any nodes that depend on the map structure. */
 	hyruleUpdateControllerNodes();
 }
 
 static int
-hyruleMapConfigRead(struct cdev *dev, struct uio *uio, int ioflag)
+hyruleMapConfigRead(struct cdev *dev, struct uio *userIo, int ioflag)
 {
-	char buf[128];
-	int x, y, pos = 0;
+	char configBuffer[128];
+	int mapX, mapY, currentPosition = 0;
 
-	sx_slock(&hyruleSx);
+	/* Shared lock for reading map configuration. */
+	sx_slock(&hyruleSharedExclusion);
 	if (!hyruleIsActive()) {
-		const char *msg = (hyrulePower == 0) ? "POWER OFF\n" : "GAME OVER\n";
-		int msgLen = strlen(msg);
-		if (uio->uio_offset >= msgLen) {
-			sx_sunlock(&hyruleSx);
+		const char *message = (hyrulePower == 0) ? "POWER OFF\n" : "GAME OVER\n";
+		int messageLength = strlen(message);
+		if (userIo->uio_offset >= messageLength) {
+			sx_sunlock(&hyruleSharedExclusion);
 			return (0);
 		}
-		int error = uiomove(__DECONST(char *, msg) + uio->uio_offset, msgLen - uio->uio_offset, uio);
-		sx_sunlock(&hyruleSx);
+		int error = uiomove(__DECONST(char *, message) + userIo->uio_offset, messageLength - userIo->uio_offset, userIo);
+		sx_sunlock(&hyruleSharedExclusion);
 		return (error);
 	}
 
-	for (y = 0; y < MAP_SIZE; y++) {
-		for (x = 0; x < MAP_SIZE; x++) {
-			buf[pos++] = worldMap[y][x];
+	/* Build the flat map string. */
+	for (mapY = 0; mapY < MAP_SIZE; mapY++) {
+		for (mapX = 0; mapX < MAP_SIZE; mapX++) {
+			configBuffer[currentPosition++] = worldMap[mapY][mapX];
 		}
-		buf[pos++] = '\n';
+		configBuffer[currentPosition++] = '\n';
 	}
-	buf[pos] = '\0';
+	configBuffer[currentPosition] = '\0';
 
-	if (uio->uio_offset >= pos) {
-		sx_sunlock(&hyruleSx);
+	if (userIo->uio_offset >= currentPosition) {
+		sx_sunlock(&hyruleSharedExclusion);
 		return (0);
 	}
-	int error = uiomove(buf + uio->uio_offset, pos - uio->uio_offset, uio);
-	sx_sunlock(&hyruleSx);
+	/* Copy configuration to userspace. */
+	int error = uiomove(configBuffer + userIo->uio_offset, currentPosition - userIo->uio_offset, userIo);
+	sx_sunlock(&hyruleSharedExclusion);
 	return (error);
 }
 
 static int
-hyruleMapConfigWrite(struct cdev *dev, struct uio *uio, int ioflag)
+hyruleMapConfigWrite(struct cdev *dev, struct uio *userIo, int ioflag)
 {
-	char input[256];
-	int error, len, x = 0, y = 0, i;
+	char inputBuffer[256];
+	int error, length, mapX = 0, mapY = 0, i;
 
-	sx_xlock(&hyruleSx);
+	/* Exclusive lock for modifying map configuration. */
+	sx_xlock(&hyruleSharedExclusion);
 	if (!hyrulePower) {
-		sx_xunlock(&hyruleSx);
+		sx_xunlock(&hyruleSharedExclusion);
 		return (EACCES);
 	}
-	len = MIN(uio->uio_resid, sizeof(input) - 1);
-	error = uiomove(input, len, uio);
+	/* Read the new map configuration from userspace. */
+	length = MIN(userIo->uio_resid, sizeof(inputBuffer) - 1);
+	error = uiomove(inputBuffer, length, userIo);
 	if (error) {
-		sx_xunlock(&hyruleSx);
+		sx_xunlock(&hyruleSharedExclusion);
 		return (error);
 	}
-	input[len] = '\0';
-	for (i = 0; i < len && y < MAP_SIZE; i++) {
-		if (isspace(input[i])) continue;
-		worldMap[y][x] = input[i];
-		x++;
-		if (x >= MAP_SIZE) {
-			x = 0;
-			y++;
+	inputBuffer[length] = '\0';
+	/* Apply the new map configuration. */
+	for (i = 0; i < length && mapY < MAP_SIZE; i++) {
+		if (isspace(inputBuffer[i])) continue;
+		worldMap[mapY][mapX] = inputBuffer[i];
+		mapX++;
+		if (mapX >= MAP_SIZE) {
+			mapX = 0;
+			mapY++;
 		}
 	}
-	sx_xunlock(&hyruleSx);
+	sx_xunlock(&hyruleSharedExclusion);
+	/* Update dependent nodes. */
 	hyruleUpdateControllerNodes();
 	return (0);
 }
@@ -578,25 +629,35 @@ hyruleMapDrain(void)
 void
 hyruleMapInit(void)
 {
-	int x, y;
+	int mapX, mapY;
+
+	/* Initialize the background task for local node updates. */
 	TASK_INIT(&localUpdateTask, 0, hyruleUpdateLocalNodesTask, NULL);
-	for (y = 0; y < MAP_SIZE; y++) {
-		for (x = 0; x < MAP_SIZE; x++) {
-			worldMap[y][x] = 'f';
-			worldEntrances[y][x] = 0;
+
+	/* Initialize the map with default values ('f' for field, 0 for no entrance). */
+	for (mapY = 0; mapY < MAP_SIZE; mapY++) {
+		for (mapX = 0; mapX < MAP_SIZE; mapX++) {
+			worldMap[mapY][mapX] = 'f';
+			worldEntrances[mapY][mapX] = 0;
 		}
 	}
-	worldMap[2][2] = '1';
-	worldMap[2][7] = '2';
-	worldMap[7][2] = '3';
-	worldMap[5][5] = 'g';
-	worldMap[9][9] = 'u';
-	worldMap[5][0] = 'W';
-	worldEntrances[0][0] = 'c';
+
+	/* Manually set up some iconic locations on the map. */
+	worldMap[2][2] = '1'; /* Dungeon 1 */
+	worldMap[2][7] = '2'; /* Dungeon 2 */
+	worldMap[7][2] = '3'; /* Dungeon 3 */
+	worldMap[5][5] = 'g'; /* Ganon's Castle */
+	worldMap[9][9] = 'u'; /* Secret Upgrade */
+	worldMap[5][0] = 'W'; /* Water/Waterfall */
+
+	/* Define entrance types for the locations above. */
+	worldEntrances[0][0] = 'c'; /* Starting Cave */
 	worldEntrances[2][2] = '1';
 	worldEntrances[2][7] = '2';
 	worldEntrances[7][2] = '3';
 	worldEntrances[5][5] = 'g';
 	worldEntrances[9][9] = 'u';
+
+	/* Trigger initial local node creation. */
 	hyruleUpdateLocalNodes();
 }

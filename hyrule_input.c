@@ -46,7 +46,7 @@ static char buttonAMapping[128] = "";
 static char buttonBMapping[128] = "";
 
 /* Controller nodes */
-static struct hyruleProp *controllerProps[8] = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+static struct hyruleProperty *controllerProps[8] = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
 
 static const char *controllerNames[] = { 
 	"console/controller/up", 
@@ -79,7 +79,7 @@ static struct task controllerUpdateTask;
 static d_read_t hyruleControllerRead;
 static d_write_t hyruleControllerWrite;
 
-struct cdevsw hyruleControllerCdevsw = {
+struct cdevsw hyruleControllerCharacterDeviceSwitch = {
 	.d_version = D_VERSION,
 	.d_open = hyruleOpen,
 	.d_close = hyruleClose,
@@ -89,78 +89,93 @@ struct cdevsw hyruleControllerCdevsw = {
 };
 
 /* State for the secret "cheat code" sequence */
-static int hIdx = 0;
-static const int hSeq[] = { 0, 0, 1, 1, 2, 3, 2, 3, 5, 4, 7 };
+static int comboSequenceIndex = 0;
+static const int comboSequence[] = { 0, 0, 1, 1, 2, 3, 2, 3, 5, 4, 7 };
 
 /*
  * Methods (Prototypes)
  */
 static void hyruleUpdateControllerNodesTask(void *context, int pending);
-static void checkComboSeq(int input);
+static void checkComboSeq(int inputButtonIndex);
 
 /*
  * Methods (Definitions)
  */
 
 static void
-checkComboSeq(int input)
+checkComboSeq(int inputButtonIndex)
 {
-	if (input == hSeq[hIdx]) {
-		hIdx++;
-		if (hIdx == (sizeof(hSeq) / sizeof(hSeq[0]))) {
+	/* 
+	 * Check if the pressed button matches the next expected button 
+	 * in the secret combo sequence.
+	 */
+	if (inputButtonIndex == comboSequence[comboSequenceIndex]) {
+		comboSequenceIndex++;
+		/* If the full sequence is completed... */
+		if (comboSequenceIndex == (sizeof(comboSequence) / sizeof(comboSequence[0]))) {
 			printf("[HYRULE] Link feels a strange surge of power!\n");
+			/* Activate cheat mode. */
 			hyruleInvincible = 1;
 			hyruleUpdateStatusNodes();
-			hIdx = 0;
+			comboSequenceIndex = 0;
 		}
 	} else {
-		if (input == hSeq[0])
-			hIdx = 1;
+		/* If the sequence is broken, reset or restart from the first button. */
+		if (inputButtonIndex == comboSequence[0])
+			comboSequenceIndex = 1;
 		else
-			hIdx = 0;
+			comboSequenceIndex = 0;
 	}
 }
 
 static void
 hyruleUpdateControllerNodesTask(void *context, int pending)
 {
-	int x, y, i;
-	struct hyruleProp *toRemove[4] = { NULL, NULL, NULL, NULL };
+	int playerX, playerY, i;
+	struct hyruleProperty *nodesToRemove[4] = { NULL, NULL, NULL, NULL };
 
-	sx_xlock(&hyruleSx);
+	/* 
+	 * Acquire a shared exclusion lock to update the available controller 
+	 * button nodes based on the player's current location and map accessibility.
+	 */
+	sx_xlock(&hyruleSharedExclusion);
 	
-	x = hyruleGetPropInt("characters/link/location/x", 0);
-	y = hyruleGetPropInt("characters/link/location/y", 0);
+	playerX = hyruleGetPropInt("characters/link/location/x", 0);
+	playerY = hyruleGetPropInt("characters/link/location/y", 0);
 
+	/* Check directional buttons (up, down, left, right). */
 	for (i = 0; i < 4; i++) {
-		int nx = x + controllerDx[i];
-		int ny = y + controllerDy[i];
+		int nextX = playerX + controllerDx[i];
+		int nextY = playerY + controllerDy[i];
 
-		if (hyruleMapIsAccessible(nx, ny)) {
+		/* If the next tile is accessible, ensure the corresponding button node exists. */
+		if (hyruleMapIsAccessible(nextX, nextY)) {
 			if (controllerProps[i] == NULL) {
-				addHyruleNodeCustom(controllerNames[i], "", &hyruleControllerCdevsw);
-				struct hyruleProp *p;
-				mtx_lock(&hyruleMtx);
-				LIST_FOREACH(p, &propList, next) {
-					if (strcmp(p->name, controllerNames[i]) == 0) {
-						controllerProps[i] = p;
+				addHyrulePropertyNodeCustom(controllerNames[i], "", &hyruleControllerCharacterDeviceSwitch);
+				struct hyruleProperty *property;
+				mtx_lock(&hyruleMutex);
+				LIST_FOREACH(property, &propertyList, next) {
+					if (strcmp(property->name, controllerNames[i]) == 0) {
+						controllerProps[i] = property;
 						break;
 					}
 				}
-				mtx_unlock(&hyruleMtx);
+				mtx_unlock(&hyruleMutex);
 			}
 		} else {
+			/* If the tile is blocked, mark the button node for removal. */
 			if (controllerProps[i] != NULL) {
-				toRemove[i] = controllerProps[i];
+				nodesToRemove[i] = controllerProps[i];
 				controllerProps[i] = NULL;
 			}
 		}
 	}
-	sx_xunlock(&hyruleSx);
+	sx_xunlock(&hyruleSharedExclusion);
 
+	/* Perform node removal outside of the lock. */
 	for (i = 0; i < 4; i++) {
-		if (toRemove[i] != NULL)
-			removeHyruleNode(toRemove[i]);
+		if (nodesToRemove[i] != NULL)
+			removeHyrulePropertyNode(nodesToRemove[i]);
 	}
 }
 
@@ -171,63 +186,72 @@ hyruleUpdateControllerNodes(void)
 }
 
 static int
-hyruleControllerRead(struct cdev *dev, struct uio *uio, int ioflag)
+hyruleControllerRead(struct cdev *dev, struct uio *userIo, int ioflag)
 {
-	struct hyruleProp *p = dev->si_drv1;
-	int i, dir = -1;
+	struct hyruleProperty *property = dev->si_drv1;
+	int i, buttonIndex = -1;
 
-	if (uio->uio_offset > 0)
+	/* Seek is not supported for controller button interaction. */
+	if (userIo->uio_offset > 0)
 		return (0);
 
+	/* Identify which button was 'read'. */
 	for (i = 0; i < 8; i++) {
-		if (p == controllerProps[i]) {
-			dir = i;
+		if (property == controllerProps[i]) {
+			buttonIndex = i;
 			break;
 		}
 	}
 
-	if (dir == -1)
+	/* If the property doesn't match any controller button, something is wrong. */
+	if (buttonIndex == -1)
 		return (ENXIO);
 
-	sx_xlock(&hyruleSx);
+	sx_xlock(&hyruleSharedExclusion);
 	if (!hyruleIsActive()) {
-		sx_xunlock(&hyruleSx);
+		sx_xunlock(&hyruleSharedExclusion);
 		return (EACCES);
 	}
 
-	checkComboSeq(dir);
+	/* Update the cheat combo state. */
+	checkComboSeq(buttonIndex);
 
-	if (dir < 4) {
-		int nx = hyruleGetPropInt("characters/link/location/x", 0) + controllerDx[dir];
-		int ny = hyruleGetPropInt("characters/link/location/y", 0) + controllerDy[dir];
+	/* Logic for movement buttons (Indices 0-3). */
+	if (buttonIndex < 4) {
+		int nextX = hyruleGetPropInt("characters/link/location/x", 0) + controllerDx[buttonIndex];
+		int nextY = hyruleGetPropInt("characters/link/location/y", 0) + controllerDy[buttonIndex];
 
-		hyruleSetPropInt("characters/link/location/x", nx);
-		hyruleSetPropInt("characters/link/location/y", ny);
-		printf("[HYRULE] Link moved to (%d, %d) via %s\n", nx, ny, controllerNames[dir]);
+		hyruleSetPropInt("characters/link/location/x", nextX);
+		hyruleSetPropInt("characters/link/location/y", nextY);
+		printf("[HYRULE] Link moved to (%d, %d) via %s\n", nextX, nextY, controllerNames[buttonIndex]);
 	} else {
-		char *mapping = (dir == 4) ? buttonAMapping : buttonBMapping;
-		if (mapping[0] != '\0') {
-			struct hyruleProp *prop = NULL;
-			mtx_lock(&hyruleMtx);
-			LIST_FOREACH(prop, &propList, next) {
-				if (strcmp(prop->name, mapping) == 0) {
+		/* Logic for action buttons (A, B, Select, Start). */
+		char *buttonMapping = (buttonIndex == 4) ? buttonAMapping : buttonBMapping;
+		if (buttonMapping[0] != '\0') {
+			/* If the button is mapped to an item, return that item's current value. */
+			struct hyruleProperty *itemProperty = NULL;
+			mtx_lock(&hyruleMutex);
+			LIST_FOREACH(itemProperty, &propertyList, next) {
+				if (strcmp(itemProperty->name, buttonMapping) == 0) {
 					break;
 				}
 			}
-			mtx_unlock(&hyruleMtx);
-			if (prop) {
-				int error = uiomove(prop->value, strlen(prop->value), uio);
-				sx_xunlock(&hyruleSx);
+			mtx_unlock(&hyruleMutex);
+			if (itemProperty) {
+				int error = uiomove(itemProperty->value, strlen(itemProperty->value), userIo);
+				sx_xunlock(&hyruleSharedExclusion);
 				return (error);
 			}
 		}
 	}
 	
-	sx_xunlock(&hyruleSx);
+	sx_xunlock(&hyruleSharedExclusion);
 
-	uiomove(__DECONST(char *, controllerMsgs[dir]), strlen(controllerMsgs[dir]), uio);
+	/* Return the default message for the button press. */
+	uiomove(__DECONST(char *, controllerMsgs[buttonIndex]), strlen(controllerMsgs[buttonIndex]), userIo);
 	
-	if (dir < 4) {
+	/* If Link moved, we need to refresh the available nodes. */
+	if (buttonIndex < 4) {
 		hyruleUpdateControllerNodes();
 		hyruleUpdateLocalNodes();
 	}
@@ -236,71 +260,78 @@ hyruleControllerRead(struct cdev *dev, struct uio *uio, int ioflag)
 }
 
 static int
-hyruleControllerWrite(struct cdev *dev, struct uio *uio, int ioflag)
+hyruleControllerWrite(struct cdev *dev, struct uio *userIo, int ioflag)
 {
-	struct hyruleProp *p = dev->si_drv1;
-	int i, dir = -1;
+	struct hyruleProperty *property = dev->si_drv1;
+	int i, buttonIndex = -1;
 
+	/* Identify which button is being written to. */
 	for (i = 0; i < 8; i++) {
-		if (p == controllerProps[i]) {
-			dir = i;
+		if (property == controllerProps[i]) {
+			buttonIndex = i;
 			break;
 		}
 	}
 
-	if (dir == -1)
+	if (buttonIndex == -1)
 		return (ENXIO);
 
-	sx_xlock(&hyruleSx);
+	sx_xlock(&hyruleSharedExclusion);
 	if (!hyruleIsActive()) {
-		sx_xunlock(&hyruleSx);
+		sx_xunlock(&hyruleSharedExclusion);
 		return (EACCES);
 	}
 
-	checkComboSeq(dir);
+	/* Check for cheat sequence. */
+	checkComboSeq(buttonIndex);
 
-	if (dir < 4) {
-		int nx = hyruleGetPropInt("characters/link/location/x", 0) + controllerDx[dir];
-		int ny = hyruleGetPropInt("characters/link/location/y", 0) + controllerDy[dir];
+	if (buttonIndex < 4) {
+		/* Movement buttons: update coordinates. */
+		int nextX = hyruleGetPropInt("characters/link/location/x", 0) + controllerDx[buttonIndex];
+		int nextY = hyruleGetPropInt("characters/link/location/y", 0) + controllerDy[buttonIndex];
 
-		hyruleSetPropInt("characters/link/location/x", nx);
-		hyruleSetPropInt("characters/link/location/y", ny);
-		printf("[HYRULE] Link moved to (%d, %d) via write to %s\n", nx, ny, controllerNames[dir]);
-		uio->uio_resid = 0;
+		hyruleSetPropInt("characters/link/location/x", nextX);
+		hyruleSetPropInt("characters/link/location/y", nextY);
+		printf("[HYRULE] Link moved to (%d, %d) via write to %s\n", nextX, nextY, controllerNames[buttonIndex]);
+		userIo->uio_resid = 0;
 	} else {
-		char input[128];
+		/* Action buttons: allow mapping to item nodes. */
+		char inputBuffer[128];
 		int error;
-		int len = MIN(uio->uio_resid, sizeof(input) - 1);
-		error = uiomove(input, len, uio);
+		int inputLength = MIN(userIo->uio_resid, sizeof(inputBuffer) - 1);
+		error = uiomove(inputBuffer, inputLength, userIo);
 		if (error) {
-			sx_xunlock(&hyruleSx);
+			sx_xunlock(&hyruleSharedExclusion);
 			return (error);
 		}
-		input[len] = '\0';
-		while (len > 0 && (input[len-1] == '\n' || input[len-1] == '\r')) {
-			input[--len] = '\0';
+		inputBuffer[inputLength] = '\0';
+		/* Strip trailing newlines. */
+		while (inputLength > 0 && (inputBuffer[inputLength-1] == '\n' || inputBuffer[inputLength-1] == '\r')) {
+			inputBuffer[--inputLength] = '\0';
 		}
 
-		if (strncmp(input, "characters/link/items/", 22) == 0) {
-			struct hyruleProp *prop = NULL;
-			mtx_lock(&hyruleMtx);
-			LIST_FOREACH(prop, &propList, next) {
-				if (strcmp(prop->name, input) == 0) {
+		/* If input matches an item path, perform the mapping. */
+		if (strncmp(inputBuffer, "characters/link/items/", 22) == 0) {
+			struct hyruleProperty *itemProperty = NULL;
+			mtx_lock(&hyruleMutex);
+			LIST_FOREACH(itemProperty, &propertyList, next) {
+				if (strcmp(itemProperty->name, inputBuffer) == 0) {
 					break;
 				}
 			}
-			mtx_unlock(&hyruleMtx);
-			if (prop) {
-				char *mapping = (dir == 4) ? buttonAMapping : buttonBMapping;
-				strlcpy(mapping, input, 128);
-				printf("[HYRULE] Button %c mapped to %s\n", (dir == 4) ? 'A' : 'B', input);
+			mtx_unlock(&hyruleMutex);
+			if (itemProperty) {
+				char *buttonMapping = (buttonIndex == 4) ? buttonAMapping : buttonBMapping;
+				strlcpy(buttonMapping, inputBuffer, 128);
+				printf("[HYRULE] Button %c mapped to %s\n", (buttonIndex == 4) ? 'A' : 'B', inputBuffer);
 			}
 		}
 	}
 	
-	sx_xunlock(&hyruleSx);
+	sx_xunlock(&hyruleSharedExclusion);
 
-	if (dir < 4) {
+	/* Trigger node updates if player moved. */
+	if (buttonIndex < 4) {
 		hyruleUpdateControllerNodes();
 		hyruleUpdateLocalNodes();
 	}
@@ -317,24 +348,27 @@ hyruleInputDrain(void)
 void
 hyruleInputInit(void)
 {
+	/* Initialize the background task for controller node updates. */
 	TASK_INIT(&controllerUpdateTask, 0, hyruleUpdateControllerNodesTask, NULL);
 
-	addHyruleNodeCustom("console/controller/a", "", &hyruleControllerCdevsw);
-	addHyruleNodeCustom("console/controller/b", "", &hyruleControllerCdevsw);
-	addHyruleNodeCustom("console/controller/select", "", &hyruleControllerCdevsw);
-	addHyruleNodeCustom("console/controller/start", "", &hyruleControllerCdevsw);
+	/* Pre-create the main action buttons. */
+	addHyrulePropertyNodeCustom("console/controller/a", "", &hyruleControllerCharacterDeviceSwitch);
+	addHyrulePropertyNodeCustom("console/controller/b", "", &hyruleControllerCharacterDeviceSwitch);
+	addHyrulePropertyNodeCustom("console/controller/select", "", &hyruleControllerCharacterDeviceSwitch);
+	addHyrulePropertyNodeCustom("console/controller/start", "", &hyruleControllerCharacterDeviceSwitch);
 
-	struct hyruleProp *p;
-	mtx_lock(&hyruleMtx);
-	LIST_FOREACH(p, &propList, next) {
-		if (strcmp(p->name, "console/controller/a") == 0)
-			controllerProps[4] = p;
-		else if (strcmp(p->name, "console/controller/b") == 0)
-			controllerProps[5] = p;
-		else if (strcmp(p->name, "console/controller/select") == 0)
-			controllerProps[6] = p;
-		else if (strcmp(p->name, "console/controller/start") == 0)
-			controllerProps[7] = p;
+	/* Cache the action button property pointers for fast access. */
+	struct hyruleProperty *property;
+	mtx_lock(&hyruleMutex);
+	LIST_FOREACH(property, &propertyList, next) {
+		if (strcmp(property->name, "console/controller/a") == 0)
+			controllerProps[4] = property;
+		else if (strcmp(property->name, "console/controller/b") == 0)
+			controllerProps[5] = property;
+		else if (strcmp(property->name, "console/controller/select") == 0)
+			controllerProps[6] = property;
+		else if (strcmp(property->name, "console/controller/start") == 0)
+			controllerProps[7] = property;
 	}
-	mtx_unlock(&hyruleMtx);
+	mtx_unlock(&hyruleMutex);
 }

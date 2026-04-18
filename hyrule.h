@@ -49,49 +49,49 @@
 /* 
  * Variables (Global state and locks)
  * 
- * hyruleMtx: Fast leaf mutex for list integrity.
- * hyruleSx: Sleepable SX lock for data contents and I/O.
- * propList: Head of the linked list of all properties.
+ * hyruleMutex: Fast leaf mutex for list integrity.
+ * hyruleSharedExclusion: Sleepable SX lock for data contents and I/O.
+ * propertyList: Head of the linked list of all properties.
  */
-struct hyruleProp;
-extern struct mtx hyruleMtx;
-extern struct sx hyruleSx;
-extern LIST_HEAD(propHead, hyruleProp) propList;
+struct hyruleProperty;
+extern struct mtx hyruleMutex;
+extern struct sx hyruleSharedExclusion;
+extern LIST_HEAD(propertyHead, hyruleProperty) propertyList;
 extern int hyrulePower;
 extern int hyruleCartridge;
 extern int hyruleInvincible;
 
 /* 
  * Shared device operations (Handlers).
- * These follow the FreeBSD cdevsw (character device switch) interface.
+ * These follow the FreeBSD characterDeviceSwitch (character device switch) interface.
  */
-extern struct cdevsw hyruleMapCdevsw;
-extern struct cdevsw hyruleMapConfigCdevsw;
-extern struct cdevsw hyruleControllerCdevsw;
-extern struct cdevsw hyruleSaveCdevsw;
-extern struct cdevsw hyruleLoadCdevsw;
-extern struct cdevsw hyruleLocalCdevsw;
+extern struct cdevsw hyruleMapCharacterDeviceSwitch;
+extern struct cdevsw hyruleMapConfigCharacterDeviceSwitch;
+extern struct cdevsw hyruleControllerCharacterDeviceSwitch;
+extern struct cdevsw hyruleSaveCharacterDeviceSwitch;
+extern struct cdevsw hyruleLoadCharacterDeviceSwitch;
+extern struct cdevsw hyruleLocalCharacterDeviceSwitch;
 
 /*
  * Structs/Types
  */
 
 /**
- * struct hyruleProp - Represents a single property/node in the system.
+ * struct hyruleProperty - Represents a single property/node in the system.
  *
  * Each instance of this structure corresponds to a character device under /dev/hyrule/.
- * @cdev: Pointer to the kernel's character device structure.
+ * @characterDevice: Pointer to the kernel's character device structure.
  * @name: The path of the property (e.g., "characters/link/stats/health").
  * @value: The current value of the property, stored as a string.
  * @defaultValue: The value this property returns to after a reset.
  * @next: Linked list pointers for the global property list.
  */
-struct hyruleProp {
-	struct cdev *cdev;
+struct hyruleProperty {
+	struct cdev *characterDevice;
 	char name[256];
 	char value[1024]; /* Enough for 10x10 map and strings */
 	char defaultValue[1024];
-	LIST_ENTRY(hyruleProp) next;
+	LIST_ENTRY(hyruleProperty) next;
 };
 
 /* 
@@ -113,9 +113,9 @@ d_mmap_single_t hyruleMmapSingle;
 d_purge_t hyrulePurge;
 
 /* Helper functions in hyrule.c */
-int addHyruleNode(const char *path, const char *initialVal);
-int addHyruleNodeCustom(const char *path, const char *initialVal, struct cdevsw *sw);
-void removeHyruleNode(struct hyruleProp *p);
+int addHyrulePropertyNode(const char *path, const char *initialVal);
+int addHyrulePropertyNodeCustom(const char *path, const char *initialVal, struct cdevsw *deviceSwitch);
+void removeHyrulePropertyNode(struct hyruleProperty *property);
 void hyruleReset(void);
 int hyruleIsActive(void);
 int hyruleGetPropInt(const char *name, int defaultVal);
