@@ -35,10 +35,14 @@
 #include <sys/systm.h>
 #include <sys/malloc.h>
 #include <sys/taskqueue.h>
-#include <sys/syscallsubr.h>
+#include <sys/sysctl.h>
+#include <sys/smp.h>
+#include <sys/resource.h>
 #include <sys/linker.h>
 #include <sys/kthread.h>
 #include <sys/proc.h>
+#include <sys/syscallsubr.h>
+#include <sys/sbuf.h>
 
 /*
  * Hyrule Kernel Module Core
@@ -50,7 +54,20 @@ struct prop_head prop_list = LIST_HEAD_INITIALIZER(prop_list);
 struct mtx hyrule_mtx;	/* Protects prop_list */
 struct sx hyrule_sx;	/* Protects property values across uiomove */
 
+static int hyrule_coretemp_res = -1; /* -1: not attempted, 0/EEXIST: success, errno: error */
+static int hyrule_amdtemp_res = -1;
+
 static struct cdevsw hyrule_cdevsw;
+static d_read_t hyrule_cpu_read;
+static void hyrule_update_status_nodes_task(void *context, int pending);
+
+static struct cdevsw hyrule_cpu_cdevsw = {
+	.d_version = D_VERSION,
+	.d_open = hyrule_open,
+	.d_close = hyrule_close,
+	.d_read = hyrule_cpu_read,
+	.d_name = "hyrule_cpu",
+};
 
 int hyrule_power = 1;
 int hyrule_cartridge = 0; /* Starts dusty */
@@ -292,6 +309,106 @@ hyrule_read(struct cdev *dev, struct uio *uio, int ioflag)
 	return (error);
 }
 
+static int
+hyrule_cpu_read(struct cdev *dev, struct uio *uio, int ioflag)
+{
+	struct sbuf *sb;
+	long *times;
+	int error;
+	size_t len;
+	size_t times_sz;
+
+	/* 
+	 * Use mp_ncpus to get the number of CPUs found by the kernel.
+	 */
+	times_sz = mp_ncpus * CPUSTATES * sizeof(long);
+	times = malloc(times_sz, M_DEVBUF, M_WAITOK | M_ZERO);
+
+	/* 
+	 * Example of getting information from core kernel:
+	 * We query kern.cp_times to get per-CPU tick counts.
+	 */
+	if (kernel_sysctlbyname(curthread, "kern.cp_times", times, &times_sz, NULL, 0, NULL, 0) != 0) {
+		memset(times, 0, times_sz);
+	}
+
+	/* Use sbuf(9) for robust JSON generation */
+	sb = sbuf_new_auto();
+	if (sb == NULL) {
+		free(times, M_DEVBUF);
+		return (ENOMEM);
+	}
+
+	sbuf_printf(sb, "{\n");
+	sbuf_printf(sb, "  \"ncpus\": %d,\n", mp_ncpus);
+	
+	/* Report status of temperature drivers */
+	sbuf_printf(sb, "  \"drivers\": {\n");
+	sbuf_printf(sb, "    \"coretemp\": \"%s\",\n", 
+	    (hyrule_coretemp_res == 0 || hyrule_coretemp_res == EEXIST) ? "loaded" : 
+	    (hyrule_coretemp_res == -1) ? "pending" : "not found");
+	sbuf_printf(sb, "    \"amdtemp\": \"%s\"\n",
+	    (hyrule_amdtemp_res == 0 || hyrule_amdtemp_res == EEXIST) ? "loaded" :
+	    (hyrule_amdtemp_res == -1) ? "pending" : "not found");
+	sbuf_printf(sb, "  },\n");
+
+	sbuf_printf(sb, "  \"cpus\": [\n");
+
+	for (int i = 0; i < mp_ncpus; i++) {
+		int temp = 0;
+		size_t temp_sz = sizeof(temp);
+		char name[64];
+
+		/* 
+		 * Example of getting information from other modules:
+		 * We query coretemp or amdtemp via their sysctl interfaces.
+		 */
+		snprintf(name, sizeof(name), "dev.cpu.%d.temperature", i);
+		error = kernel_sysctlbyname(curthread, name, &temp, &temp_sz, NULL, 0, NULL, 0);
+
+		sbuf_printf(sb, "    {\n      \"id\": %d,\n", i);
+		if (error == 0) {
+			/* Convert deci-Kelvin to Celsius */
+			int val = temp - 2731;
+			int whole = val / 10;
+			int frac = val % 10;
+			if (frac < 0) frac = -frac;
+			sbuf_printf(sb, "      \"temperature_c\": %d.%d,\n", whole, frac);
+		} else {
+			sbuf_printf(sb, "      \"temperature_c\": null,\n");
+			sbuf_printf(sb, "      \"temperature_status\": \"%s\",\n",
+			    (error == ENOENT) ? "no sysctl" : "error");
+		}
+
+		/* Use the tick counts we retrieved earlier */
+		sbuf_printf(sb, "      \"stats\": {\n");
+		sbuf_printf(sb, "        \"user\": %ld,\n", times[i * CPUSTATES + CP_USER]);
+		sbuf_printf(sb, "        \"nice\": %ld,\n", times[i * CPUSTATES + CP_NICE]);
+		sbuf_printf(sb, "        \"sys\": %ld,\n", times[i * CPUSTATES + CP_SYS]);
+		sbuf_printf(sb, "        \"intr\": %ld,\n", times[i * CPUSTATES + CP_INTR]);
+		sbuf_printf(sb, "        \"idle\": %ld\n", times[i * CPUSTATES + CP_IDLE]);
+		sbuf_printf(sb, "      }\n");
+		
+		sbuf_printf(sb, "    }%s\n", (i == mp_ncpus - 1) ? "" : ",");
+	}
+
+	sbuf_printf(sb, "  ]\n}\n");
+	sbuf_finish(sb);
+
+	len = sbuf_len(sb);
+	if (uio->uio_offset >= len) {
+		error = 0;
+		goto out;
+	}
+
+	error = uiomove(sbuf_data(sb) + uio->uio_offset, len - uio->uio_offset, uio);
+
+out:
+	sbuf_delete(sb);
+	free(times, M_DEVBUF);
+	return (error);
+}
+
 static void hyrule_update_prop_state(struct hyrule_prop *p, int loading);
 
 void
@@ -391,6 +508,25 @@ hyrule_update_status_nodes_task(void *context, int pending)
 
 	if (to_remove != NULL)
 		remove_hyrule_node(to_remove);
+}
+
+/*
+ * Background thread for sideloading optional hardware-dependent modules.
+ * This ensures hyrule loads even if coretemp/amdtemp are not applicable
+ * to the current hardware.
+ */
+static void
+hyrule_load_modules_thread(void *arg)
+{
+	int fileid;
+	/*
+	 * kern_kldload is used to dynamically load other kernel modules.
+	 * We try both coretemp (Intel) and amdtemp (AMD).
+	 * If they are already loaded, we get EEXIST, which is fine.
+	 */
+	hyrule_coretemp_res = kern_kldload(curthread, "coretemp", &fileid);
+	hyrule_amdtemp_res = kern_kldload(curthread, "amdtemp", &fileid);
+	kproc_exit(0);
 }
 
 void
@@ -731,6 +867,8 @@ hyrule_loader(struct module *mod, int cmd, void *arg)
 		if (error) goto fail;
 		error = add_hyrule_node("console/cartridge", "dusty\n");
 		if (error) goto fail;
+		error = add_hyrule_node_custom("console/cpu", "", &hyrule_cpu_cdevsw);
+		if (error) goto fail;
 
 		/* Help device */
 		error = add_hyrule_node("help", 
@@ -756,6 +894,9 @@ hyrule_loader(struct module *mod, int cmd, void *arg)
 		if (error) goto fail;
 		error = add_hyrule_node_custom("game/load", "", &hyrule_load_cdevsw);
 		if (error) goto fail;
+
+		/* Sideload optional temperature modules in background */
+		kproc_create(hyrule_load_modules_thread, NULL, NULL, 0, 0, "hyrule_loader");
 
 		/* Characters */
 		error = add_hyrule_node("characters/link/stats/health", "3\n");
@@ -814,6 +955,9 @@ hyrule_loader(struct module *mod, int cmd, void *arg)
 		break;
 
 	case MOD_UNLOAD:
+		taskqueue_drain(taskqueue_thread, &status_update_task);
+		hyrule_map_drain();
+		hyrule_input_drain();
 		while (1) {
 			mtx_lock(&hyrule_mtx);
 			p = LIST_FIRST(&prop_list);
@@ -855,6 +999,9 @@ hyrule_loader(struct module *mod, int cmd, void *arg)
 	return (error);
 
 fail:
+	taskqueue_drain(taskqueue_thread, &status_update_task);
+	hyrule_map_drain();
+	hyrule_input_drain();
 	while (1) {
 		mtx_lock(&hyrule_mtx);
 		p = LIST_FIRST(&prop_list);
@@ -880,3 +1027,4 @@ static moduledata_t hyrule_mod = {
 };
 
 DECLARE_MODULE(hyrule, hyrule_mod, SI_SUB_DRIVERS, SI_ORDER_MIDDLE);
+MODULE_VERSION(hyrule, 1);

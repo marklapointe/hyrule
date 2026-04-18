@@ -66,7 +66,7 @@ struct cdevsw hyrule_local_cdevsw = {
 static void
 hyrule_update_local_nodes_task(void *context, int pending)
 {
-	struct hyrule_prop *to_remove[8] = { NULL };
+	struct hyrule_prop *to_remove[16] = { NULL };
 	int tr_idx = 0;
 
 	sx_xlock(&hyrule_sx);
@@ -761,6 +761,12 @@ hyrule_map_config_write(struct cdev *dev, struct uio *uio, int ioflag)
 	return (0);
 }
 
+
+void
+hyrule_map_drain(void)
+{
+	taskqueue_drain(taskqueue_thread, &local_update_task);
+}
 
 void
 hyrule_map_init(void)

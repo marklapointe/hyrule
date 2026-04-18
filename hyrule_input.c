@@ -305,6 +305,12 @@ hyrule_controller_write(struct cdev *dev, struct uio *uio, int ioflag)
 }
 
 void
+hyrule_input_drain(void)
+{
+	taskqueue_drain(taskqueue_thread, &controller_update_task);
+}
+
+void
 hyrule_input_init(void)
 {
 	TASK_INIT(&controller_update_task, 0, hyrule_update_controller_nodes_task, NULL);

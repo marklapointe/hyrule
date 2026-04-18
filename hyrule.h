@@ -104,6 +104,8 @@ void hyrule_map_set_config(const char *input, size_t len);
 void hyrule_update_controller_nodes(void);
 void hyrule_update_local_nodes(void);
 void hyrule_update_status_nodes(void);
+void hyrule_map_drain(void);
+void hyrule_input_drain(void);
 
 /* Input logic in hyrule_input.c */
 void hyrule_input_init(void);
