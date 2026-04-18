@@ -46,21 +46,61 @@
 
 /*
  * Hyrule Kernel Module Core
+ *
+ * This module implements a hierarchical property system represented as
+ * character devices under /dev/hyrule/. It demonstrates several FreeBSD
+ * kernel programming concepts:
+ * - Character device drivers (cdev)
+ * - Locking (mtx and sx)
+ * - Kernel threads (kproc) and taskqueues
+ * - Cross-module interaction (kern_kldload, sysctl)
+ * - Safe string/buffer management (sbuf)
+ * - File systems and UIO (User I/O)
  */
 
+/* 
+ * Global list of all properties (nodes) created by the module.
+ * Each node corresponds to a file in /dev/hyrule/.
+ */
 struct prop_head prop_list = LIST_HEAD_INITIALIZER(prop_list);
 
-/* Global locks */
-struct mtx hyrule_mtx;	/* Protects prop_list */
-struct sx hyrule_sx;	/* Protects property values across uiomove */
+/* 
+ * Global locks:
+ * 
+ * hyrule_mtx: A leaf mutex (MTX_DEF). Mutexes are fast, non-sleepable locks.
+ * We use it to protect the integrity of the 'prop_list' linked list itself
+ * during insertions, removals, and iterations. Because it's a mutex, we
+ * cannot perform any operation that might sleep (like I/O or certain mallocs)
+ * while holding it.
+ *
+ * hyrule_sx: A shared/exclusive (SX) lock. SX locks are sleepable and support
+ * multiple concurrent readers (sx_slock) but only one writer (sx_xlock).
+ * We use this to protect the 'value' strings within properties. Since moving
+ * data to/from userland (uiomove) can sleep (e.g., if the user's page is swapped out),
+ * we must use a sleepable lock like SX instead of a mutex.
+ */
+struct mtx hyrule_mtx;	/* Protects prop_list structural integrity */
+struct sx hyrule_sx;	/* Protects property 'value' contents across sleepable I/O */
 
+/*
+ * Status tracking for optional temperature modules.
+ * These are updated by a background kproc during module initialization.
+ */
 static int hyrule_coretemp_res = -1; /* -1: not attempted, 0/EEXIST: success, errno: error */
 static int hyrule_amdtemp_res = -1;
 
+/* 
+ * Prototypes for device switch handlers.
+ * cdevsw (Character Device Switch) is the "vtable" for character devices.
+ */
 static struct cdevsw hyrule_cdevsw;
 static d_read_t hyrule_cpu_read;
 static void hyrule_update_status_nodes_task(void *context, int pending);
 
+/*
+ * Specialized cdevsw for the CPU stats node.
+ * It uses a custom read handler to generate JSON on-the-fly.
+ */
 static struct cdevsw hyrule_cpu_cdevsw = {
 	.d_version = D_VERSION,
 	.d_open = hyrule_open,
@@ -69,10 +109,19 @@ static struct cdevsw hyrule_cpu_cdevsw = {
 	.d_name = "hyrule_cpu",
 };
 
-int hyrule_power = 1;
-int hyrule_cartridge = 0; /* Starts dusty */
-int hyrule_invincible = 0;
+/* Global game state variables */
+int hyrule_power = 1;      /* System power state (0=off, 1=on) */
+int hyrule_cartridge = 0;  /* Cartridge cleanliness (0=dusty, 1=clean) */
+int hyrule_invincible = 0; /* Cheat mode active? */
 
+/**
+ * hyrule_get_prop_int - Safely retrieve an integer value from a property node.
+ * @name: The path of the property (e.g., "characters/link/stats/health")
+ * @default_val: Value to return if the property is not found.
+ *
+ * This function iterates through the global property list while holding
+ * the list mutex. It converts the string value to a long.
+ */
 int
 hyrule_get_prop_int(const char *name, int default_val)
 {
@@ -90,6 +139,13 @@ hyrule_get_prop_int(const char *name, int default_val)
 	return (val);
 }
 
+/**
+ * hyrule_set_prop_int - Safely update a property node with an integer value.
+ * @name: The path of the property.
+ * @val: The integer value to set.
+ *
+ * Formats the integer as a string and stores it in the property's value buffer.
+ */
 void
 hyrule_set_prop_int(const char *name, int val)
 {
@@ -105,6 +161,11 @@ hyrule_set_prop_int(const char *name, int val)
 	mtx_unlock(&hyrule_mtx);
 }
 
+/**
+ * hyrule_is_active - Check if the game is in a playable state.
+ *
+ * The game is active if power is on AND Link has health > 0 (or is invincible).
+ */
 int
 hyrule_is_active(void)
 {
@@ -128,6 +189,11 @@ hyrule_is_active(void)
 	return (hp > 0);
 }
 
+/**
+ * hyrule_reset - Restore all properties to their default values.
+ *
+ * Used when the system is powered on, reset, or Link dies.
+ */
 void
 hyrule_reset(void)
 {
@@ -152,6 +218,10 @@ hyrule_reset(void)
 	printf("[HYRULE] System Reset. Welcome back!\n");
 }
 
+/*
+ * The main cdevsw for standard property nodes.
+ * Most nodes under /dev/hyrule/ use these generic handlers.
+ */
 static struct cdevsw hyrule_cdevsw = {
 	.d_version = D_VERSION,
 	.d_open = hyrule_open,
@@ -169,12 +239,18 @@ static struct cdevsw hyrule_cdevsw = {
 	.d_name = "hyrule",
 };
 
+/**
+ * hyrule_open - Called when a user opens a /dev/hyrule/ device.
+ */
 int
 hyrule_open(struct cdev *dev, int oflags, int devtype, struct thread *td)
 {
 	return (0);
 }
 
+/**
+ * hyrule_close - Called when the last file descriptor for the device is closed.
+ */
 int
 hyrule_close(struct cdev *dev, int fflag, int devtype, struct thread *td)
 {
@@ -265,6 +341,21 @@ hyrule_purge(struct cdev *dev)
 	 */
 }
 
+/**
+ * hyrule_read - Generic read handler for property nodes.
+ * @dev: The character device being read.
+ * @uio: The UIO structure describing the data transfer.
+ * @ioflag: File status flags.
+ *
+ * This function handles 'cat' or other read operations on property nodes.
+ * It uses the UIO (User I/O) subsystem, which is the standard way to transfer
+ * data between kernel and user space in FreeBSD.
+ * 
+ * Key concept: uio_offset.
+ * The kernel tracks the current read position in uio->uio_offset. If a user
+ * reads 10 bytes, the next read will start at offset 10. We must respect this
+ * to allow 'cat' and other tools to work correctly.
+ */
 int
 hyrule_read(struct cdev *dev, struct uio *uio, int ioflag)
 {
@@ -309,6 +400,18 @@ hyrule_read(struct cdev *dev, struct uio *uio, int ioflag)
 	return (error);
 }
 
+/**
+ * hyrule_cpu_read - Specialized read handler for /dev/hyrule/console/cpu.
+ *
+ * This handler generates a dynamic JSON report containing:
+ * - System CPU count (mp_ncpus)
+ * - Per-CPU temperatures (via sysctl)
+ * - Per-CPU execution ticks (via kern.cp_times)
+ * - Status of the coretemp/amdtemp drivers.
+ *
+ * It uses the sbuf(9) API, which provides safe, auto-extending string buffers
+ * in the kernel. This is much safer than manual snprintf into a fixed buffer.
+ */
 static int
 hyrule_cpu_read(struct cdev *dev, struct uio *uio, int ioflag)
 {
@@ -409,9 +512,19 @@ out:
 	return (error);
 }
 
-static void hyrule_update_prop_state(struct hyrule_prop *p, int loading);
-
-void
+/**
+ * hyrule_update_prop_state - Process side-effects of property changes.
+ * @p: The property that was just modified.
+ * @loading: True if called during a game load operation.
+ *
+ * This function implements the "game logic":
+ * - Turning power on/off (with the "dusty cartridge" gamble).
+ * - Triggering a system reset.
+ * - Cleaning/dirtying the cartridge.
+ * - Checking for Game Over (Link's health).
+ * - Toggling invincibility.
+ */
+static void
 hyrule_update_prop_state(struct hyrule_prop *p, int loading)
 {
 	/* Handle Console commands */
@@ -479,6 +592,13 @@ hyrule_update_prop_state(struct hyrule_prop *p, int loading)
 static struct task status_update_task;
 static struct hyrule_prop *invincible_node = NULL;
 
+/**
+ * hyrule_update_status_nodes_task - Background task to add/remove status nodes.
+ *
+ * Adding or removing device nodes (make_dev/destroy_dev) can be slow or
+ * require specific contexts. We use a taskqueue to perform these updates
+ * asynchronously to avoid blocking the user thread that triggered the change.
+ */
 static void
 hyrule_update_status_nodes_task(void *context, int pending)
 {
@@ -510,10 +630,14 @@ hyrule_update_status_nodes_task(void *context, int pending)
 		remove_hyrule_node(to_remove);
 }
 
-/*
- * Background thread for sideloading optional hardware-dependent modules.
- * This ensures hyrule loads even if coretemp/amdtemp are not applicable
- * to the current hardware.
+/**
+ * hyrule_load_modules_thread - Background thread for sideloading modules.
+ *
+ * This function runs as a 'kproc' (kernel process). It attempts to load
+ * 'coretemp' and 'amdtemp' modules. We do this in a background thread to:
+ * 1. Avoid slowing down the main module load.
+ * 2. Avoid complex locking issues during module initialization (MOD_LOAD).
+ * 3. Handle cases where the modules might not be available or applicable.
  */
 static void
 hyrule_load_modules_thread(void *arg)
@@ -535,6 +659,15 @@ hyrule_update_status_nodes(void)
 	taskqueue_enqueue(taskqueue_thread, &status_update_task);
 }
 
+/**
+ * hyrule_write - Generic write handler for property nodes.
+ * @dev: The character device being written to.
+ * @uio: The UIO structure describing the data transfer from userland.
+ * @ioflag: File status flags.
+ *
+ * Handles 'echo' or other write operations. It updates the property's value
+ * and then calls hyrule_update_prop_state() to trigger any side-effects.
+ */
 int
 hyrule_write(struct cdev *dev, struct uio *uio, int ioflag)
 {
@@ -649,6 +782,12 @@ hyrule_validate_save(const char *buf, size_t total_len)
 	return (0);
 }
 
+/**
+ * hyrule_save_read - Handler for /dev/hyrule/game/save.
+ *
+ * Generates a serialized representation of all mutable game properties.
+ * This can be redirected to a file: `cat /dev/hyrule/game/save > my_save.hyrule`
+ */
 static int
 hyrule_save_read(struct cdev *dev, struct uio *uio, int ioflag)
 {
@@ -691,6 +830,12 @@ hyrule_save_read(struct cdev *dev, struct uio *uio, int ioflag)
 	return (error);
 }
 
+/**
+ * hyrule_load_write - Handler for /dev/hyrule/game/load.
+ *
+ * Parses a serialized game state and updates all properties.
+ * This can be loaded from a file: `cat my_save.hyrule > /dev/hyrule/game/load`
+ */
 static int
 hyrule_load_write(struct cdev *dev, struct uio *uio, int ioflag)
 {
@@ -784,6 +929,18 @@ struct cdevsw hyrule_load_cdevsw = {
 	.d_name = "hyrule_load",
 };
 
+/**
+ * add_hyrule_node_custom - Create a new hierarchical property node.
+ * @path: The relative path under /dev/hyrule/
+ * @initial_val: The starting value for the property.
+ * @sw: The device switch (handlers) for this node.
+ *
+ * This is the core function for creating /dev nodes. It:
+ * 1. Allocates a 'hyrule_prop' structure.
+ * 2. Initializes 'make_dev_args' to set permissions (0666) and ownership.
+ * 3. Calls make_dev_s() to create the actual device entry.
+ * 4. Adds the node to the global 'prop_list'.
+ */
 int
 add_hyrule_node_custom(const char *path, const char *initial_val, struct cdevsw *sw)
 {
@@ -823,6 +980,9 @@ add_hyrule_node_custom(const char *path, const char *initial_val, struct cdevsw 
 	return (0);
 }
 
+/**
+ * remove_hyrule_node - Destroy a property node and its /dev entry.
+ */
 void
 remove_hyrule_node(struct hyrule_prop *p)
 {
@@ -838,12 +998,24 @@ remove_hyrule_node(struct hyrule_prop *p)
 	free(p, M_DEVBUF);
 }
 
+/**
+ * add_hyrule_node - Shortcut to create a standard property node.
+ */
 int
 add_hyrule_node(const char *path, const char *initial_val)
 {
 	return add_hyrule_node_custom(path, initial_val, &hyrule_cdevsw);
 }
 
+/**
+ * hyrule_loader - Module event handler.
+ *
+ * This is the main entry point for the kernel module. It handles:
+ * - MOD_LOAD: Initializing locks, creating all initial /dev/hyrule/ nodes.
+ * - MOD_UNLOAD: Draining taskqueues, destroying all nodes, and cleaning up locks.
+ * - MOD_SHUTDOWN: System-wide shutdown notification.
+ * - MOD_QUIESCE: Checking if it's safe to unload.
+ */
 static int
 hyrule_loader(struct module *mod, int cmd, void *arg)
 {

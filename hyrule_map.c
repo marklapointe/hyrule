@@ -34,26 +34,48 @@
 #include <sys/ctype.h>
 #include <sys/taskqueue.h>
 
-/* Map State */
+/*
+ * Hyrule World Map and Location Management
+ *
+ * This file handles the overworld map, dungeons, and context-sensitive
+ * device nodes (e.g., /dev/hyrule/map/local/entrance).
+ */
+
+/* 
+ * The world map is a grid of characters.
+ * Lowercase characters (like 'f' for field) are accessible.
+ * Uppercase characters (like 'W' for woods) are blocked.
+ */
 static char world_map[MAP_SIZE][MAP_SIZE];
+
+/* Separate grid to track entrances to caves, shops, and dungeons */
 static char world_entrances[MAP_SIZE][MAP_SIZE];
 
-/* Local nodes under /dev/hyrule/map/local/ */
-static struct hyrule_prop *local_entrance_node = NULL;
-static struct hyrule_prop *local_exit_node = NULL;
-static struct hyrule_prop *local_next_node = NULL;
-static struct hyrule_prop *local_prev_node = NULL;
-static struct hyrule_prop *local_treasure_node = NULL;
-static struct hyrule_prop *local_boss_node = NULL;
-static struct hyrule_prop *local_room_node = NULL;
+/* 
+ * Local nodes under /dev/hyrule/map/local/.
+ * These nodes are dynamic: they only exist when Link is in a specific context.
+ */
+static struct hyrule_prop *local_entrance_node = NULL; /* Node for entering a cave/dungeon */
+static struct hyrule_prop *local_exit_node = NULL;     /* Node for leaving a cave/dungeon */
+static struct hyrule_prop *local_next_node = NULL;     /* Move to next dungeon room */
+static struct hyrule_prop *local_prev_node = NULL;     /* Move to previous dungeon room */
+static struct hyrule_prop *local_treasure_node = NULL; /* Open a treasure chest */
+static struct hyrule_prop *local_boss_node = NULL;     /* Fight a dungeon boss */
+static struct hyrule_prop *local_room_node = NULL;     /* Room description */
+
+/* State tracking for internal locations */
 static int inside_entrance = 0;
 static char current_entrance_type[32] = "";
 
+/* Task for asynchronous update of context-sensitive nodes */
 static struct task local_update_task;
 static d_read_t hyrule_local_read;
 static d_write_t hyrule_local_write;
 static d_close_t hyrule_local_close;
 
+/**
+ * hyrule_local_cdevsw - Device switch for all dynamic context-sensitive nodes.
+ */
 struct cdevsw hyrule_local_cdevsw = {
 	.d_version = D_VERSION,
 	.d_open = hyrule_open,
@@ -63,6 +85,17 @@ struct cdevsw hyrule_local_cdevsw = {
 	.d_name = "hyrule_local",
 };
 
+/**
+ * hyrule_update_local_nodes_task - The context engine of the module.
+ *
+ * This function is called whenever Link moves. It checks Link's current
+ * coordinates and decides which dynamic nodes should be available.
+ * 
+ * Logic flow:
+ * 1. If inside a dungeon: show next/prev/room/treasure/boss nodes.
+ * 2. If at an entrance on overworld: show the entrance node (e.g., dungeon1).
+ * 3. Otherwise: remove all local nodes.
+ */
 static void
 hyrule_update_local_nodes_task(void *context, int pending)
 {
@@ -295,6 +328,9 @@ hyrule_update_local_nodes_task(void *context, int pending)
 	}
 }
 
+/**
+ * hyrule_update_local_nodes - Schedule a context update.
+ */
 void
 hyrule_update_local_nodes(void)
 {
@@ -302,6 +338,16 @@ hyrule_update_local_nodes(void)
 }
 
 
+/**
+ * hyrule_local_read - Handle interactions with dynamic context nodes.
+ *
+ * This is where the game events happen:
+ * - Entering a dungeon.
+ * - Talking to an NPC (Old Knight/White Knight).
+ * - Getting items (Sword, Boomerang, etc.).
+ * - Fighting bosses.
+ * - Collecting Triforce pieces.
+ */
 static int
 hyrule_local_read(struct cdev *dev, struct uio *uio, int ioflag)
 {
@@ -477,6 +523,9 @@ hyrule_local_read(struct cdev *dev, struct uio *uio, int ioflag)
 	return (0);
 }
 
+/**
+ * hyrule_local_write - Simplified interaction with dynamic nodes.
+ */
 static int
 hyrule_local_write(struct cdev *dev, struct uio *uio, int ioflag)
 {
@@ -577,6 +626,9 @@ get_map_symbol(char type)
 	}
 }
 
+/**
+ * hyrule_map_is_accessible - Collision detection logic.
+ */
 int
 hyrule_map_is_accessible(int x, int y)
 {
@@ -590,6 +642,12 @@ hyrule_map_is_accessible(int x, int y)
 }
 
 /* Display /dev/hyrule/map */
+/**
+ * hyrule_map_read - Render the world map to the user.
+ *
+ * Generates an ASCII representation of the 10x10 world map.
+ * This is shown when 'cat /dev/hyrule/map/view' is called.
+ */
 static int
 hyrule_map_read(struct cdev *dev, struct uio *uio, int ioflag)
 {
@@ -762,12 +820,18 @@ hyrule_map_config_write(struct cdev *dev, struct uio *uio, int ioflag)
 }
 
 
+/**
+ * hyrule_map_drain - Ensure all map updates are finished.
+ */
 void
 hyrule_map_drain(void)
 {
 	taskqueue_drain(taskqueue_thread, &local_update_task);
 }
 
+/**
+ * hyrule_map_init - Set up the initial world state.
+ */
 void
 hyrule_map_init(void)
 {

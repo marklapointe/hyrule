@@ -27,9 +27,14 @@ All planned features and stability improvements have been implemented. The modul
 - Updated manual page (`hyrule.4`) and `README.md` with complete documentation. ✓
 - Cleaned up development history for public repository hosting. ✓
 
-### Phase 5: Dynamic Movement Devices
-- Add `remove_hyrule_node` to safely manage property lifecycle. ✓
-- Implement `/dev/hyrule/move/` directory with dynamic nodes (up, down, left, right). ✓
-- Ensure nodes only appear for valid moves based on map accessibility. ✓
-- Enable movement via `cat` (read) or `echo` (write) on directional nodes. ✓
-- Use a `taskqueue` for safe asynchronous device management. ✓
+### Phase 6: System Integration & Enhanced JSON
+- Implemented `/dev/hyrule/console/cpu` providing real-time system stats in JSON format. ✓
+- Developed a dynamic sideloading mechanism using a background `kproc` to load `coretemp` and `amdtemp` modules. ✓
+- Refactored all dynamic string generation to use the safe `sbuf(9)` API. ✓
+- Added a secret "Konami Code" style cheat sequence to enable invincibility. ✓
+- Enhanced all local exploration nodes (`map/local/*`) to be context-sensitive and dynamically created. ✓
+
+### Phase 7: Comprehensive Documentation & Cleanup
+- Added detailed, "overexplained" comments throughout the codebase for educational purposes. ✓
+- Updated `README.md` and the manual page (`hyrule.4`) with the latest features and architectural details. ✓
+- Verified that all taskqueues and kprocs are properly drained/exited during module unload. ✓

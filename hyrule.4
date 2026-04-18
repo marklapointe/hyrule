@@ -45,6 +45,12 @@ Reset button. Write '1' to restore all character stats and map to default values
 Represents the game cartridge. Can be 'clean' or 'dusty'.
 If 'dusty', reading other devices may result in random graphics glitches.
 Write 'blow' to this device to clean the cartridge and stabilize the system.
+.It Pa /dev/hyrule/console/cpu
+Provides detailed system statistics in JSON format, including CPU execution ticks
+and per-core temperatures (via
+.Xr coretemp 4
+or
+.Xr amdtemp 4 ) .
 .It Pa /dev/hyrule/game/save
 Save device. Reading from this device provides a serialized state of the game
 that can be redirected to a file.
@@ -109,6 +115,10 @@ Directory containing character data (health, stamina, rupees).
 Directory containing object data (Triforce).
 .El
 .Sh EXAMPLES
+To see the system statistics:
+.Pp
+.Dl "cat /dev/hyrule/console/cpu"
+.Pp
 To see the current world map:
 .Pp
 .Dl "cat /dev/hyrule/map/view"

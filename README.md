@@ -18,6 +18,9 @@ The `hyrule` module is a character device driver that creates a hierarchical str
 - **Sword Upgrades**: Visit the Upgrade Cave to improve your sword (Wooden, White, Master Sword) as you collect Triforce pieces.
 - **Item Equipment**: Link can now find items like the `sword` and equip them to the Game Console controller's A and B buttons.
 - **Save & Load**: Persist your game state via `/dev/hyrule/game/save` and `/dev/hyrule/game/load`.
+- **System Statistics (JSON)**: Access real-time CPU statistics and temperatures via `/dev/hyrule/console/cpu`. This node demonstrates cross-module interaction with `coretemp` and `amdtemp`.
+- **Dynamic Sideloading**: The module automatically attempts to load required temperature drivers (`coretemp`, `amdtemp`) in a background kernel thread upon startup.
+- **Cheat Codes**: Discover the secret button sequence to Link's hidden power!
 - **Enhanced Map System**: A 10x10 grid accessible via `/dev/hyrule/map/view`, featuring detailed terrain and Link's position.
 - **Controller Interface**: Use the Game Console controller nodes in `/dev/hyrule/console/controller/` to interact. Directional nodes (`up`, `down`, `left`, `right`) appear dynamically when movement is possible. Action buttons (`a`, `b`) are always available.
 - **Map Configuration**: Customize the world map by writing a grid of characters to `/dev/hyrule/world/map_config`. Lowercase characters are accessible, while uppercase characters block Link's path.
@@ -75,6 +78,36 @@ Move Link east:
 cat /dev/hyrule/console/controller/right
 ```
 
+### System Statistics (JSON)
+View detailed CPU usage and temperature data:
+```bash
+cat /dev/hyrule/console/cpu
+```
+Example output:
+```json
+{
+  "ncpus": 4,
+  "drivers": {
+    "coretemp": "loaded",
+    "amdtemp": "not found"
+  },
+  "cpus": [
+    {
+      "id": 0,
+      "temperature_c": 45.1,
+      "stats": {
+        "user": 12345,
+        "nice": 0,
+        "sys": 5432,
+        "intr": 123,
+        "idle": 987654
+      }
+    },
+    ...
+  ]
+}
+```
+
 ### Save and Load
 Save current progress:
 ```bash
@@ -121,6 +154,19 @@ sudo ./console_test.sh
 sudo ./save_load_test.sh
 sudo ./safe_load_test.sh
 ```
+
+## Architecture & Implementation
+
+### Sideloading Mechanism
+The `hyrule` module demonstrates a robust way to handle optional dependencies. Instead of using `MODULE_DEPEND`, which can prevent a module from loading if a dependency is missing, `hyrule` uses a background `kproc` (kernel process) to attempt loading `coretemp` and `amdtemp` at runtime. This ensures the module works on any x86 hardware, providing temperature data when possible and gracefully reporting "null" when not.
+
+### Safe String Handling
+All dynamic string generation (like the JSON output) is handled via the `sbuf(9)` API. This prevents buffer overflows and ensures that even with a high number of CPUs, the output remains safe and complete.
+
+### Locking Strategy
+The module uses a dual-locking strategy:
+- `mtx` (Mutex): Fast, non-sleepable locks used for protecting the internal property list structure.
+- `sx` (Shared/Exclusive): Sleepable locks used for protecting the property values themselves, allowing multiple concurrent readers and safe data transfer (via `uiomove`) to user space.
 
 ## License
 

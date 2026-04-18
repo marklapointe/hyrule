@@ -50,6 +50,16 @@
  * Hyrule Kernel Module Structure
  */
 
+/**
+ * struct hyrule_prop - Represents a single property/node in the system.
+ *
+ * Each instance of this structure corresponds to a character device under /dev/hyrule/.
+ * @cdev: Pointer to the kernel's character device structure.
+ * @name: The path of the property (e.g., "characters/link/stats/health").
+ * @value: The current value of the property, stored as a string.
+ * @default_value: The value this property returns to after a reset.
+ * @next: Linked list pointers for the global property list.
+ */
 struct hyrule_prop {
 	struct cdev *cdev;
 	char name[256];
@@ -58,7 +68,13 @@ struct hyrule_prop {
 	LIST_ENTRY(hyrule_prop) next;
 };
 
-/* Global locks and list defined in hyrule.c */
+/* 
+ * Global state and locks.
+ * 
+ * hyrule_mtx: Fast leaf mutex for list integrity.
+ * hyrule_sx: Sleepable SX lock for data contents and I/O.
+ * prop_list: Head of the linked list of all properties.
+ */
 extern struct mtx hyrule_mtx;
 extern struct sx hyrule_sx;
 extern LIST_HEAD(prop_head, hyrule_prop) prop_list;
@@ -66,7 +82,10 @@ extern int hyrule_power;
 extern int hyrule_cartridge;
 extern int hyrule_invincible;
 
-/* Shared device operations */
+/* 
+ * Shared device operations (Handlers).
+ * These follow the FreeBSD cdevsw (character device switch) interface.
+ */
 d_open_t  hyrule_open;
 d_close_t hyrule_close;
 d_read_t  hyrule_read;

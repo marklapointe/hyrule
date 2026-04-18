@@ -35,10 +35,24 @@
 #include <sys/taskqueue.h>
 #include <sys/malloc.h>
 
+/*
+ * Hyrule Input Handling
+ *
+ * This file implements the "game controller" logic. It allows the user to
+ * interact with the module by reading from or writing to /dev/hyrule/console/controller/ nodes.
+ */
+
+/* Mappings for the A and B buttons to specific items */
 static char button_a_mapping[128] = "";
 static char button_b_mapping[128] = "";
 
+/* 
+ * Array of property pointers for the 8 controller buttons:
+ * 0: Up, 1: Down, 2: Left, 3: Right, 4: A, 5: B, 6: Select, 7: Start
+ */
 static struct hyrule_prop *controller_props[8] = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+
+/* Corresponding device node names */
 static const char *controller_names[] = { 
 	"console/controller/up", 
 	"console/controller/down", 
@@ -49,6 +63,8 @@ static const char *controller_names[] = {
 	"console/controller/select",
 	"console/controller/start"
 };
+
+/* Feedback messages shown when a button is "pressed" (read) */
 static const char *controller_msgs[] = { 
 	"Moved up\n", 
 	"Moved down\n", 
@@ -59,14 +75,20 @@ static const char *controller_msgs[] = {
 	"Select button pressed\n",
 	"Start button pressed\n"
 };
+
+/* Movement vectors for the D-pad (Up, Down, Left, Right) */
 static int controller_dx[] = { 0, 0, -1, 1 };
 static int controller_dy[] = { -1, 1, 0, 0 };
 
+/* Task for asynchronous update of available controller nodes */
 static struct task controller_update_task;
 
 static d_read_t hyrule_controller_read;
 static d_write_t hyrule_controller_write;
 
+/**
+ * hyrule_controller_cdevsw - Device switch for all controller nodes.
+ */
 struct cdevsw hyrule_controller_cdevsw = {
 	.d_version = D_VERSION,
 	.d_open = hyrule_open,
@@ -76,9 +98,14 @@ struct cdevsw hyrule_controller_cdevsw = {
 	.d_name = "hyrule_controller",
 };
 
+/* State for the secret "cheat code" sequence */
 static int h_idx = 0;
 static const int h_seq[] = { 0, 0, 1, 1, 2, 3, 2, 3, 5, 4, 7 }; /* U, U, D, D, L, R, L, R, B, A, Start */
 
+/**
+ * check_combo_seq - Check if the current button press advances the cheat sequence.
+ * @input: The index of the button pressed (0-7).
+ */
 static void
 check_combo_seq(int input)
 {
@@ -99,6 +126,13 @@ check_combo_seq(int input)
 	}
 }
 
+/**
+ * hyrule_update_controller_nodes_task - Dynamic D-pad node management.
+ *
+ * This task is responsible for creating and destroying the up/down/left/right
+ * device nodes based on whether the adjacent tiles on the map are accessible.
+ * If Link is next to a wall, the corresponding direction node will disappear.
+ */
 static void
 hyrule_update_controller_nodes_task(void *context, int pending)
 {
@@ -153,12 +187,22 @@ hyrule_update_controller_nodes_task(void *context, int pending)
 	}
 }
 
+/**
+ * hyrule_update_controller_nodes - Schedule a controller node update.
+ */
 void
 hyrule_update_controller_nodes(void)
 {
 	taskqueue_enqueue(taskqueue_thread, &controller_update_task);
 }
 
+/**
+ * hyrule_controller_read - Handler for reading a controller node.
+ *
+ * Reading a node is equivalent to "pressing" the button.
+ * - For D-pad: Moves Link and updates the map.
+ * - For A/B: Executes the mapped item action (if any).
+ */
 static int
 hyrule_controller_read(struct cdev *dev, struct uio *uio, int ioflag)
 {
@@ -226,6 +270,14 @@ hyrule_controller_read(struct cdev *dev, struct uio *uio, int ioflag)
 	return (0);
 }
 
+/**
+ * hyrule_controller_write - Handler for writing to a controller node.
+ *
+ * Writing to a node can have different effects:
+ * - For D-pad: Same as reading (moves Link).
+ * - For A/B: Maps the button to a specific item path.
+ *   Example: `echo 'characters/link/items/sword' > /dev/hyrule/console/controller/a`
+ */
 static int
 hyrule_controller_write(struct cdev *dev, struct uio *uio, int ioflag)
 {
@@ -304,12 +356,18 @@ hyrule_controller_write(struct cdev *dev, struct uio *uio, int ioflag)
 	return (0);
 }
 
+/**
+ * hyrule_input_drain - Ensure all pending controller updates are finished.
+ */
 void
 hyrule_input_drain(void)
 {
 	taskqueue_drain(taskqueue_thread, &controller_update_task);
 }
 
+/**
+ * hyrule_input_init - Initialize the controller subsystem.
+ */
 void
 hyrule_input_init(void)
 {
