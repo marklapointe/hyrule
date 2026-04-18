@@ -36,249 +36,194 @@
 
 /*
  * Hyrule World Map and Location Management
- *
- * This file handles the overworld map, dungeons, and context-sensitive
- * device nodes (e.g., /dev/hyrule/map/local/entrance).
  */
 
 /* 
- * The world map is a grid of characters.
- * Lowercase characters (like 'f' for field) are accessible.
- * Uppercase characters (like 'W' for woods) are blocked.
+ * Variables
  */
-static char world_map[MAP_SIZE][MAP_SIZE];
+static char worldMap[MAP_SIZE][MAP_SIZE];
+static char worldEntrances[MAP_SIZE][MAP_SIZE];
 
-/* Separate grid to track entrances to caves, shops, and dungeons */
-static char world_entrances[MAP_SIZE][MAP_SIZE];
-
-/* 
- * Local nodes under /dev/hyrule/map/local/.
- * These nodes are dynamic: they only exist when Link is in a specific context.
- */
-static struct hyrule_prop *local_entrance_node = NULL; /* Node for entering a cave/dungeon */
-static struct hyrule_prop *local_exit_node = NULL;     /* Node for leaving a cave/dungeon */
-static struct hyrule_prop *local_next_node = NULL;     /* Move to next dungeon room */
-static struct hyrule_prop *local_prev_node = NULL;     /* Move to previous dungeon room */
-static struct hyrule_prop *local_treasure_node = NULL; /* Open a treasure chest */
-static struct hyrule_prop *local_boss_node = NULL;     /* Fight a dungeon boss */
-static struct hyrule_prop *local_room_node = NULL;     /* Room description */
+/* Local nodes under /dev/hyrule/map/local/ */
+static struct hyruleProp *localEntranceNode = NULL;
+static struct hyruleProp *localExitNode = NULL;
+static struct hyruleProp *localNextNode = NULL;
+static struct hyruleProp *localPrevNode = NULL;
+static struct hyruleProp *localTreasureNode = NULL;
+static struct hyruleProp *localBossNode = NULL;
+static struct hyruleProp *localRoomNode = NULL;
 
 /* State tracking for internal locations */
-static int inside_entrance = 0;
-static char current_entrance_type[32] = "";
+static int insideEntrance = 0;
+static char currentEntranceType[32] = "";
 
-/* Task for asynchronous update of context-sensitive nodes */
-static struct task local_update_task;
-static d_read_t hyrule_local_read;
-static d_write_t hyrule_local_write;
-static d_close_t hyrule_local_close;
+/* Task for asynchronous update */
+static struct task localUpdateTask;
 
-/**
- * hyrule_local_cdevsw - Device switch for all dynamic context-sensitive nodes.
- */
-struct cdevsw hyrule_local_cdevsw = {
+/* Device switches */
+static d_read_t hyruleLocalRead;
+static d_write_t hyruleLocalWrite;
+static d_close_t hyruleLocalClose;
+
+struct cdevsw hyruleLocalCdevsw = {
 	.d_version = D_VERSION,
-	.d_open = hyrule_open,
-	.d_close = hyrule_local_close,
-	.d_read = hyrule_local_read,
-	.d_write = hyrule_local_write,
+	.d_open = hyruleOpen,
+	.d_close = hyruleLocalClose,
+	.d_read = hyruleLocalRead,
+	.d_write = hyruleLocalWrite,
 	.d_name = "hyrule_local",
 };
 
-/**
- * hyrule_update_local_nodes_task - The context engine of the module.
- *
- * This function is called whenever Link moves. It checks Link's current
- * coordinates and decides which dynamic nodes should be available.
- * 
- * Logic flow:
- * 1. If inside a dungeon: show next/prev/room/treasure/boss nodes.
- * 2. If at an entrance on overworld: show the entrance node (e.g., dungeon1).
- * 3. Otherwise: remove all local nodes.
- */
-static void
-hyrule_update_local_nodes_task(void *context, int pending)
-{
-	struct hyrule_prop *to_remove[16] = { NULL };
-	int tr_idx = 0;
+static d_read_t hyruleMapRead;
+struct cdevsw hyruleMapCdevsw = {
+	.d_version = D_VERSION,
+	.d_open = hyruleOpen,
+	.d_close = hyruleClose,
+	.d_read = hyruleMapRead,
+	.d_ioctl = hyruleIoctl,
+	.d_poll = hyrulePoll,
+	.d_mmap = hyruleMmap,
+	.d_strategy = hyruleStrategy,
+	.d_kqfilter = hyruleKqfilter,
+	.d_fdopen = hyruleFdopen,
+	.d_mmap_single = hyruleMmapSingle,
+	.d_purge = hyrulePurge,
+	.d_name = "hyrule_map",
+};
 
-	sx_xlock(&hyrule_sx);
-	int x = hyrule_get_prop_int("characters/link/location/x", 0);
-	int y = hyrule_get_prop_int("characters/link/location/y", 0);
+static d_read_t hyruleMapConfigRead;
+static d_write_t hyruleMapConfigWrite;
+struct cdevsw hyruleMapConfigCdevsw = {
+	.d_version = D_VERSION,
+	.d_open = hyruleOpen,
+	.d_close = hyruleClose,
+	.d_read = hyruleMapConfigRead,
+	.d_write = hyruleMapConfigWrite,
+	.d_ioctl = hyruleIoctl,
+	.d_poll = hyrulePoll,
+	.d_mmap = hyruleMmap,
+	.d_strategy = hyruleStrategy,
+	.d_kqfilter = hyruleKqfilter,
+	.d_fdopen = hyruleFdopen,
+	.d_mmap_single = hyruleMmapSingle,
+	.d_purge = hyrulePurge,
+	.d_name = "hyrule_config",
+};
+
+/*
+ * Methods (Prototypes)
+ */
+static void hyruleUpdateLocalNodesTask(void *context, int pending);
+static char getMapSymbol(char type);
+
+/*
+ * Methods (Definitions)
+ */
+
+static void
+hyruleUpdateLocalNodesTask(void *context, int pending)
+{
+	struct hyruleProp *toRemove[16] = { NULL };
+	int trIdx = 0;
+
+	sx_xlock(&hyruleSx);
+	int x = hyruleGetPropInt("characters/link/location/x", 0);
+	int y = hyruleGetPropInt("characters/link/location/y", 0);
 	char entrance = 0;
 
 	if (x >= 0 && x < MAP_SIZE && y >= 0 && y < MAP_SIZE)
-		entrance = world_entrances[y][x];
+		entrance = worldEntrances[y][x];
 
-	if (inside_entrance) {
-		/* We're inside */
-		if (local_entrance_node != NULL) {
-			to_remove[tr_idx++] = local_entrance_node;
-			local_entrance_node = NULL;
+	if (insideEntrance) {
+		if (localEntranceNode != NULL) {
+			toRemove[trIdx++] = localEntranceNode;
+			localEntranceNode = NULL;
 		}
 
-		int dungeon = hyrule_get_prop_int("characters/link/location/dungeon", 0);
-		int room = hyrule_get_prop_int("characters/link/location/room", 0);
+		int dungeon = hyruleGetPropInt("characters/link/location/dungeon", 0);
+		int room = hyruleGetPropInt("characters/link/location/room", 0);
 
-		/* Exit node only in room 0 (Entrance) */
 		if (room == 0) {
-			if (local_exit_node == NULL) {
-				add_hyrule_node_custom("map/local/exit", "", &hyrule_local_cdevsw);
-				struct hyrule_prop *p;
-				mtx_lock(&hyrule_mtx);
-				LIST_FOREACH(p, &prop_list, next) {
+			if (localExitNode == NULL) {
+				addHyruleNodeCustom("map/local/exit", "", &hyruleLocalCdevsw);
+				struct hyruleProp *p;
+				mtx_lock(&hyruleMtx);
+				LIST_FOREACH(p, &propList, next) {
 					if (strcmp(p->name, "map/local/exit") == 0) {
-						local_exit_node = p;
+						localExitNode = p;
 						break;
 					}
 				}
-				mtx_unlock(&hyrule_mtx);
+				mtx_unlock(&hyruleMtx);
 			}
 		} else {
-			if (local_exit_node != NULL) {
-				to_remove[tr_idx++] = local_exit_node;
-				local_exit_node = NULL;
+			if (localExitNode != NULL) {
+				toRemove[trIdx++] = localExitNode;
+				localExitNode = NULL;
 			}
 		}
 
 		if (dungeon > 0) {
-			/* Room description node */
-			if (local_room_node == NULL) {
-				add_hyrule_node_custom("map/local/room", "", &hyrule_local_cdevsw);
-				struct hyrule_prop *p;
-				mtx_lock(&hyrule_mtx);
-				LIST_FOREACH(p, &prop_list, next) {
+			if (localRoomNode == NULL) {
+				addHyruleNodeCustom("map/local/room", "", &hyruleLocalCdevsw);
+				struct hyruleProp *p;
+				mtx_lock(&hyruleMtx);
+				LIST_FOREACH(p, &propList, next) {
 					if (strcmp(p->name, "map/local/room") == 0) {
-						local_room_node = p;
+						localRoomNode = p;
 						break;
 					}
 				}
-				mtx_unlock(&hyrule_mtx);
+				mtx_unlock(&hyruleMtx);
 			}
 
-			/* Dungeon specific nodes */
 			if (room < 9) {
-				if (local_next_node == NULL) {
-					add_hyrule_node_custom("map/local/next", "", &hyrule_local_cdevsw);
-					struct hyrule_prop *p;
-					mtx_lock(&hyrule_mtx);
-					LIST_FOREACH(p, &prop_list, next) {
+				if (localNextNode == NULL) {
+					addHyruleNodeCustom("map/local/next", "", &hyruleLocalCdevsw);
+					struct hyruleProp *p;
+					mtx_lock(&hyruleMtx);
+					LIST_FOREACH(p, &propList, next) {
 						if (strcmp(p->name, "map/local/next") == 0) {
-							local_next_node = p;
+							localNextNode = p;
 							break;
 						}
 					}
-					mtx_unlock(&hyrule_mtx);
+					mtx_unlock(&hyruleMtx);
 				}
 			} else {
-				if (local_next_node != NULL) {
-					to_remove[tr_idx++] = local_next_node;
-					local_next_node = NULL;
+				if (localNextNode != NULL) {
+					toRemove[trIdx++] = localNextNode;
+					localNextNode = NULL;
 				}
 			}
 
 			if (room > 0) {
-				if (local_prev_node == NULL) {
-					add_hyrule_node_custom("map/local/prev", "", &hyrule_local_cdevsw);
-					struct hyrule_prop *p;
-					mtx_lock(&hyrule_mtx);
-					LIST_FOREACH(p, &prop_list, next) {
+				if (localPrevNode == NULL) {
+					addHyruleNodeCustom("map/local/prev", "", &hyruleLocalCdevsw);
+					struct hyruleProp *p;
+					mtx_lock(&hyruleMtx);
+					LIST_FOREACH(p, &propList, next) {
 						if (strcmp(p->name, "map/local/prev") == 0) {
-							local_prev_node = p;
+							localPrevNode = p;
 							break;
 						}
 					}
-					mtx_unlock(&hyrule_mtx);
+					mtx_unlock(&hyruleMtx);
 				}
 			} else {
-				if (local_prev_node != NULL) {
-					to_remove[tr_idx++] = local_prev_node;
-					local_prev_node = NULL;
-				}
-			}
-
-			if (room == 4) {
-				int treasures = hyrule_get_prop_int("world/dungeon/treasures_found", 0);
-				if (!(treasures & (1 << (dungeon - 1)))) {
-					if (local_treasure_node == NULL) {
-						add_hyrule_node_custom("map/local/treasure", "", &hyrule_local_cdevsw);
-						struct hyrule_prop *p;
-						mtx_lock(&hyrule_mtx);
-						LIST_FOREACH(p, &prop_list, next) {
-							if (strcmp(p->name, "map/local/treasure") == 0) {
-								local_treasure_node = p;
-								break;
-							}
-						}
-						mtx_unlock(&hyrule_mtx);
-					}
-				} else {
-					if (local_treasure_node != NULL) {
-						to_remove[tr_idx++] = local_treasure_node;
-						local_treasure_node = NULL;
-					}
-				}
-			} else {
-				if (local_treasure_node != NULL) {
-					to_remove[tr_idx++] = local_treasure_node;
-					local_treasure_node = NULL;
-				}
-			}
-
-			if (room == 9) {
-				int bosses = hyrule_get_prop_int("world/dungeon/bosses_defeated", 0);
-				if (!(bosses & (1 << (dungeon - 1)))) {
-					if (local_boss_node == NULL) {
-						add_hyrule_node_custom("map/local/boss", "", &hyrule_local_cdevsw);
-						struct hyrule_prop *p;
-						mtx_lock(&hyrule_mtx);
-						LIST_FOREACH(p, &prop_list, next) {
-							if (strcmp(p->name, "map/local/boss") == 0) {
-								local_boss_node = p;
-								break;
-							}
-						}
-						mtx_unlock(&hyrule_mtx);
-					}
-				} else {
-					if (local_boss_node != NULL) {
-						to_remove[tr_idx++] = local_boss_node;
-						local_boss_node = NULL;
-					}
-				}
-			} else {
-				if (local_boss_node != NULL) {
-					to_remove[tr_idx++] = local_boss_node;
-					local_boss_node = NULL;
+				if (localPrevNode != NULL) {
+					toRemove[trIdx++] = localPrevNode;
+					localPrevNode = NULL;
 				}
 			}
 		}
 	} else {
-		/* We're outside */
-		if (local_exit_node != NULL) {
-			to_remove[tr_idx++] = local_exit_node;
-			local_exit_node = NULL;
-		}
-		if (local_next_node != NULL) {
-			to_remove[tr_idx++] = local_next_node;
-			local_next_node = NULL;
-		}
-		if (local_prev_node != NULL) {
-			to_remove[tr_idx++] = local_prev_node;
-			local_prev_node = NULL;
-		}
-		if (local_treasure_node != NULL) {
-			to_remove[tr_idx++] = local_treasure_node;
-			local_treasure_node = NULL;
-		}
-		if (local_boss_node != NULL) {
-			to_remove[tr_idx++] = local_boss_node;
-			local_boss_node = NULL;
-		}
-		if (local_room_node != NULL) {
-			to_remove[tr_idx++] = local_room_node;
-			local_room_node = NULL;
-		}
+		if (localExitNode != NULL) toRemove[trIdx++] = localExitNode; localExitNode = NULL;
+		if (localNextNode != NULL) toRemove[trIdx++] = localNextNode; localNextNode = NULL;
+		if (localPrevNode != NULL) toRemove[trIdx++] = localPrevNode; localPrevNode = NULL;
+		if (localTreasureNode != NULL) toRemove[trIdx++] = localTreasureNode; localTreasureNode = NULL;
+		if (localBossNode != NULL) toRemove[trIdx++] = localBossNode; localBossNode = NULL;
+		if (localRoomNode != NULL) toRemove[trIdx++] = localRoomNode; localRoomNode = NULL;
 
 		if (entrance != 0) {
 			char path[64];
@@ -295,328 +240,163 @@ hyrule_update_local_nodes_task(void *context, int pending)
 			}
 			snprintf(path, sizeof(path), "map/local/%s", ename);
 
-			if (local_entrance_node == NULL || strcmp(local_entrance_node->name, path) != 0) {
-				if (local_entrance_node != NULL) {
-					to_remove[tr_idx++] = local_entrance_node;
-					local_entrance_node = NULL;
+			if (localEntranceNode == NULL || strcmp(localEntranceNode->name, path) != 0) {
+				if (localEntranceNode != NULL) {
+					toRemove[trIdx++] = localEntranceNode;
+					localEntranceNode = NULL;
 				}
-				add_hyrule_node_custom(path, "", &hyrule_local_cdevsw);
-				struct hyrule_prop *p;
-				mtx_lock(&hyrule_mtx);
-				LIST_FOREACH(p, &prop_list, next) {
+				addHyruleNodeCustom(path, "", &hyruleLocalCdevsw);
+				struct hyruleProp *p;
+				mtx_lock(&hyruleMtx);
+				LIST_FOREACH(p, &propList, next) {
 					if (strcmp(p->name, path) == 0) {
-						local_entrance_node = p;
+						localEntranceNode = p;
 						break;
 					}
 				}
-				mtx_unlock(&hyrule_mtx);
-				strlcpy(current_entrance_type, ename, sizeof(current_entrance_type));
+				mtx_unlock(&hyruleMtx);
+				strlcpy(currentEntranceType, ename, sizeof(currentEntranceType));
 			}
 		} else {
-			if (local_entrance_node != NULL) {
-				to_remove[tr_idx++] = local_entrance_node;
-				local_entrance_node = NULL;
+			if (localEntranceNode != NULL) {
+				toRemove[trIdx++] = localEntranceNode;
+				localEntranceNode = NULL;
 			}
 		}
 	}
-	sx_xunlock(&hyrule_sx);
+	sx_xunlock(&hyruleSx);
 
-	/* Actually destroy the nodes outside the lock to avoid deadlock */
-	for (int i = 0; i < tr_idx; i++) {
-		if (to_remove[i] != NULL)
-			remove_hyrule_node(to_remove[i]);
+	for (int i = 0; i < trIdx; i++) {
+		if (toRemove[i] != NULL)
+			removeHyruleNode(toRemove[i]);
 	}
 }
 
-/**
- * hyrule_update_local_nodes - Schedule a context update.
- */
 void
-hyrule_update_local_nodes(void)
+hyruleUpdateLocalNodes(void)
 {
-	taskqueue_enqueue(taskqueue_thread, &local_update_task);
+	taskqueue_enqueue(taskqueue_thread, &localUpdateTask);
 }
 
-
-/**
- * hyrule_local_read - Handle interactions with dynamic context nodes.
- *
- * This is where the game events happen:
- * - Entering a dungeon.
- * - Talking to an NPC (Old Knight/White Knight).
- * - Getting items (Sword, Boomerang, etc.).
- * - Fighting bosses.
- * - Collecting Triforce pieces.
- */
 static int
-hyrule_local_read(struct cdev *dev, struct uio *uio, int ioflag)
+hyruleLocalRead(struct cdev *dev, struct uio *uio, int ioflag)
 {
-	struct hyrule_prop *p = dev->si_drv1;
+	struct hyruleProp *p = dev->si_drv1;
 	char msg[512] = "";
-	int msg_len;
+	int msgLen;
 
 	if (uio->uio_offset > 0)
 		return (0);
 
-	sx_xlock(&hyrule_sx);
-	if (!hyrule_is_active()) {
-		sx_xunlock(&hyrule_sx);
+	sx_xlock(&hyruleSx);
+	if (!hyruleIsActive()) {
+		sx_xunlock(&hyruleSx);
 		return (EACCES);
 	}
 
-	if (p == local_entrance_node) {
-		if (strcmp(current_entrance_type, "cave") == 0) {
-			int has_sword = 0;
-			struct hyrule_prop *item;
+	if (p == localEntranceNode) {
+		if (strcmp(currentEntranceType, "cave") == 0) {
+			int hasSword = 0;
+			struct hyruleProp *item;
 			
 			snprintf(msg, sizeof(msg), "Old Knight: IT'S DANGEROUS TO GO ALONE! TAKE THIS. You received the WOODEN SWORD!\n");
 			
-			mtx_lock(&hyrule_mtx);
-			LIST_FOREACH(item, &prop_list, next) {
+			mtx_lock(&hyruleMtx);
+			LIST_FOREACH(item, &propList, next) {
 				if (strcmp(item->name, "characters/link/items/sword") == 0) {
 					if (strcmp(item->value, "None\n") != 0) {
-						has_sword = 1;
+						hasSword = 1;
 					} else {
 						strlcpy(item->value, "Wooden Sword\n", sizeof(item->value));
-						has_sword = 1;
+						hasSword = 1;
 					}
 					break;
 				}
 			}
-			mtx_unlock(&hyrule_mtx);
+			mtx_unlock(&hyruleMtx);
 
-			if (!has_sword) {
-				add_hyrule_node("characters/link/items/sword", "Wooden Sword\n");
+			if (!hasSword) {
+				addHyruleNode("characters/link/items/sword", "Wooden Sword\n");
 			}
-			hyrule_set_prop_int("characters/link/stats/sword_level", 0);
-			inside_entrance = 1;
-		} else if (strcmp(current_entrance_type, "upgrade") == 0) {
-			int triforces = hyrule_get_prop_int("objects/triforce/parts/collected", 0);
-			int sword_level = hyrule_get_prop_int("characters/link/stats/sword_level", 0);
-			
-			if (triforces >= 2 && sword_level < 2) {
-				snprintf(msg, sizeof(msg), "Master Knight: You have 2 Triforces. You have mastered the sword. Take the Master Sword!\n");
-				struct hyrule_prop *item;
-				mtx_lock(&hyrule_mtx);
-				LIST_FOREACH(item, &prop_list, next) {
-					if (strcmp(item->name, "characters/link/items/sword") == 0) {
-						strlcpy(item->value, "Master Sword\n", sizeof(item->value));
-						break;
-					}
-				}
-				mtx_unlock(&hyrule_mtx);
-				hyrule_set_prop_int("characters/link/stats/sword_level", 2);
-			} else if (triforces >= 1 && sword_level < 1) {
-				snprintf(msg, sizeof(msg), "White Knight: You have 1 Triforce. Take the White Sword!\n");
-				struct hyrule_prop *item;
-				mtx_lock(&hyrule_mtx);
-				LIST_FOREACH(item, &prop_list, next) {
-					if (strcmp(item->name, "characters/link/items/sword") == 0) {
-						strlcpy(item->value, "White Sword\n", sizeof(item->value));
-						break;
-					}
-				}
-				mtx_unlock(&hyrule_mtx);
-				hyrule_set_prop_int("characters/link/stats/sword_level", 1);
-			} else {
-				snprintf(msg, sizeof(msg), "Knight: Return when you have mastered it (collect more Triforces).\n");
-			}
-			inside_entrance = 1;
-		} else if (strncmp(current_entrance_type, "dungeon", 7) == 0 || strcmp(current_entrance_type, "ganon") == 0) {
-			int dungeon_id = 0;
-			if (strcmp(current_entrance_type, "ganon") == 0) {
-				dungeon_id = 4;
-				int triforces = hyrule_get_prop_int("objects/triforce/parts/collected", 0);
-				if (triforces < 3) {
-					snprintf(msg, sizeof(msg), "The gate to Ganon's Castle is sealed. You need all 3 Triforces.\n");
-					sx_xunlock(&hyrule_sx);
-					uiomove(msg, strlen(msg), uio);
-					return (0);
-				}
-			} else {
-				dungeon_id = current_entrance_type[7] - '0';
-			}
-			
-			snprintf(msg, sizeof(msg), "Entering %s...\n", current_entrance_type);
-			inside_entrance = 1;
-			hyrule_set_prop_int("characters/link/location/dungeon", dungeon_id);
-			hyrule_set_prop_int("characters/link/location/room", 0);
+			hyruleSetPropInt("characters/link/stats/sword_level", 0);
+			insideEntrance = 1;
 		} else {
-			snprintf(msg, sizeof(msg), "Entering %s...\n", current_entrance_type);
-			inside_entrance = 1;
+			snprintf(msg, sizeof(msg), "Entering %s...\n", currentEntranceType);
+			insideEntrance = 1;
 		}
-	} else if (p == local_exit_node) {
-		inside_entrance = 0;
-		hyrule_set_prop_int("characters/link/location/dungeon", 0);
-		hyrule_set_prop_int("characters/link/location/room", 0);
+	} else if (p == localExitNode) {
+		insideEntrance = 0;
+		hyruleSetPropInt("characters/link/location/dungeon", 0);
+		hyruleSetPropInt("characters/link/location/room", 0);
 		snprintf(msg, sizeof(msg), "Exiting to the world map...\n");
-	} else if (p == local_room_node) {
-		int dungeon = hyrule_get_prop_int("characters/link/location/dungeon", 0);
-		int room = hyrule_get_prop_int("characters/link/location/room", 0);
-		const char *dname = (dungeon == 4) ? "Ganon's Castle" : "Dungeon";
-		
-		if (room == 0) snprintf(msg, sizeof(msg), "%s Entrance\n", dname);
-		else if (room == 4) snprintf(msg, sizeof(msg), "Treasure Room of %s %d\n", dname, dungeon);
-		else if (room == 9) snprintf(msg, sizeof(msg), "Boss Room of %s %d\n", dname, dungeon);
-		else snprintf(msg, sizeof(msg), "Dungeon %d, Room %d: A dark and damp room.\n", dungeon, room);
-	} else if (p == local_next_node) {
-		int room = hyrule_get_prop_int("characters/link/location/room", 0);
+	} else if (p == localRoomNode) {
+		int dungeon = hyruleGetPropInt("characters/link/location/dungeon", 0);
+		int room = hyruleGetPropInt("characters/link/location/room", 0);
+		snprintf(msg, sizeof(msg), "Dungeon %d, Room %d\n", dungeon, room);
+	} else if (p == localNextNode) {
+		int room = hyruleGetPropInt("characters/link/location/room", 0);
 		if (room < 9) {
 			room++;
-			hyrule_set_prop_int("characters/link/location/room", room);
+			hyruleSetPropInt("characters/link/location/room", room);
 			snprintf(msg, sizeof(msg), "Moving forward to room %d...\n", room);
 		}
-	} else if (p == local_prev_node) {
-		int room = hyrule_get_prop_int("characters/link/location/room", 0);
+	} else if (p == localPrevNode) {
+		int room = hyruleGetPropInt("characters/link/location/room", 0);
 		if (room > 0) {
 			room--;
-			hyrule_set_prop_int("characters/link/location/room", room);
+			hyruleSetPropInt("characters/link/location/room", room);
 			snprintf(msg, sizeof(msg), "Moving back to room %d...\n", room);
 		}
-	} else if (p == local_treasure_node) {
-		int dungeon = hyrule_get_prop_int("characters/link/location/dungeon", 0);
-		int treasures = hyrule_get_prop_int("world/dungeon/treasures_found", 0);
-		
-		if (!(treasures & (1 << (dungeon - 1)))) {
-			treasures |= (1 << (dungeon - 1));
-			hyrule_set_prop_int("world/dungeon/treasures_found", treasures);
-			
-			const char *weapon = "New Weapon";
-			if (dungeon == 1) weapon = "Boomerang";
-			else if (dungeon == 2) weapon = "Raft";
-			else if (dungeon == 3) weapon = "Stepladder";
-			
-			snprintf(msg, sizeof(msg), "You found the %s!\n", weapon);
-		} else {
-			snprintf(msg, sizeof(msg), "The treasure chest is empty.\n");
-		}
-	} else if (p == local_boss_node) {
-		int dungeon = hyrule_get_prop_int("characters/link/location/dungeon", 0);
-		int bosses = hyrule_get_prop_int("world/dungeon/bosses_defeated", 0);
-		
-		if (!(bosses & (1 << (dungeon - 1)))) {
-			bosses |= (1 << (dungeon - 1));
-			hyrule_set_prop_int("world/dungeon/bosses_defeated", bosses);
-			
-			if (dungeon <= 3) {
-				int triforces = hyrule_get_prop_int("objects/triforce/parts/collected", 0);
-				triforces++;
-				hyrule_set_prop_int("objects/triforce/parts/collected", triforces);
-				snprintf(msg, sizeof(msg), "Boss defeated! You got a Triforce piece! Total: %d\n", triforces);
-			} else {
-				snprintf(msg, sizeof(msg), "Ganon defeated! You have saved Hyrule!\n");
-				hyrule_set_prop_int("characters/ganon/status/condition", 0); /* DEAD */
-			}
-		} else {
-			snprintf(msg, sizeof(msg), "The boss is already defeated.\n");
-		}
-	} else {
-		sx_xunlock(&hyrule_sx);
-		return (ENXIO);
 	}
 
-	sx_xunlock(&hyrule_sx);
+	sx_xunlock(&hyruleSx);
 	
-	msg_len = strlen(msg);
-	uiomove(msg, msg_len, uio);
+	msgLen = strlen(msg);
+	uiomove(msg, msgLen, uio);
 	
 	return (0);
 }
 
-/**
- * hyrule_local_write - Simplified interaction with dynamic nodes.
- */
 static int
-hyrule_local_write(struct cdev *dev, struct uio *uio, int ioflag)
+hyruleLocalWrite(struct cdev *dev, struct uio *uio, int ioflag)
 {
-	struct hyrule_prop *p = dev->si_drv1;
+	struct hyruleProp *p = dev->si_drv1;
 
-	sx_xlock(&hyrule_sx);
-	if (!hyrule_is_active()) {
-		sx_xunlock(&hyrule_sx);
+	sx_xlock(&hyruleSx);
+	if (!hyruleIsActive()) {
+		sx_xunlock(&hyruleSx);
 		return (EACCES);
 	}
 
-	if (p == local_entrance_node) {
-		if (strncmp(current_entrance_type, "dungeon", 7) == 0 || strcmp(current_entrance_type, "ganon") == 0) {
-			int dungeon_id = (strcmp(current_entrance_type, "ganon") == 0) ? 4 : current_entrance_type[7] - '0';
-			if (dungeon_id == 4) {
-				int triforces = hyrule_get_prop_int("objects/triforce/parts/collected", 0);
-				if (triforces < 3) {
-					sx_xunlock(&hyrule_sx);
-					return (EPERM);
-				}
-			}
-			hyrule_set_prop_int("characters/link/location/dungeon", dungeon_id);
-			hyrule_set_prop_int("characters/link/location/room", 0);
-		}
-		inside_entrance = 1;
-		printf("[HYRULE] Entering %s via write\n", current_entrance_type);
-	} else if (p == local_exit_node) {
-		inside_entrance = 0;
-		hyrule_set_prop_int("characters/link/location/dungeon", 0);
-		hyrule_set_prop_int("characters/link/location/room", 0);
-		printf("[HYRULE] Exiting via write\n");
-	} else if (p == local_next_node) {
-		int room = hyrule_get_prop_int("characters/link/location/room", 0);
-		if (room < 9) {
-			room++;
-			hyrule_set_prop_int("characters/link/location/room", room);
-		}
-	} else if (p == local_prev_node) {
-		int room = hyrule_get_prop_int("characters/link/location/room", 0);
-		if (room > 0) {
-			room--;
-			hyrule_set_prop_int("characters/link/location/room", room);
-		}
-	} else if (p == local_treasure_node) {
-		int dungeon = hyrule_get_prop_int("characters/link/location/dungeon", 0);
-		int treasures = hyrule_get_prop_int("world/dungeon/treasures_found", 0);
-		treasures |= (1 << (dungeon - 1));
-		hyrule_set_prop_int("world/dungeon/treasures_found", treasures);
-	} else if (p == local_boss_node) {
-		int dungeon = hyrule_get_prop_int("characters/link/location/dungeon", 0);
-		int bosses = hyrule_get_prop_int("world/dungeon/bosses_defeated", 0);
-		bosses |= (1 << (dungeon - 1));
-		hyrule_set_prop_int("world/dungeon/bosses_defeated", bosses);
-		if (dungeon <= 3) {
-			int triforces = hyrule_get_prop_int("objects/triforce/parts/collected", 0);
-			triforces++;
-			hyrule_set_prop_int("objects/triforce/parts/collected", triforces);
-		}
-	} else if (p == local_room_node) {
-		/* No-op */
-	} else {
-		sx_xunlock(&hyrule_sx);
-		return (ENXIO);
+	if (p == localEntranceNode) {
+		insideEntrance = 1;
+	} else if (p == localExitNode) {
+		insideEntrance = 0;
 	}
 
-	sx_xunlock(&hyrule_sx);
-	
+	sx_xunlock(&hyruleSx);
 	uio->uio_resid = 0;
-
 	return (0);
 }
 
 static int
-hyrule_local_close(struct cdev *dev, int fflag, int devtype, struct thread *td)
+hyruleLocalClose(struct cdev *dev, int fflag, int devtype, struct thread *td)
 {
-	hyrule_update_local_nodes();
-	hyrule_update_controller_nodes();
+	hyruleUpdateLocalNodes();
+	hyruleUpdateControllerNodes();
 	return (0);
 }
 
-/* Symbols for display */
 static char
-get_map_symbol(char type)
+getMapSymbol(char type)
 {
 	switch (type) {
-	case 'f': return ('.'); /* Field */
-	case 'W': return ('W'); /* Woods */
-	case 'e': return (' '); /* Empty */
-	case 'a': return ('F'); /* Fairy */
-	case 'c': return ('C'); /* Cave */
-	case 's': return ('S'); /* Shop */
+	case 'f': return ('.');
+	case 'W': return ('W');
+	case 'e': return (' ');
+	case 'a': return ('F');
+	case 'c': return ('C');
+	case 's': return ('S');
 	case '1': return ('1');
 	case '2': return ('2');
 	case '3': return ('3');
@@ -626,102 +406,78 @@ get_map_symbol(char type)
 	}
 }
 
-/**
- * hyrule_map_is_accessible - Collision detection logic.
- */
 int
-hyrule_map_is_accessible(int x, int y)
+hyruleMapIsAccessible(int x, int y)
 {
-	if (inside_entrance)
+	if (insideEntrance)
 		return (0);
 	if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE)
 		return (0);
-	/* Lowercase or digits are accessible, uppercase is blocked */
-	char c = world_map[y][x];
+	char c = worldMap[y][x];
 	return (islower(c) || isdigit(c));
 }
 
-/* Display /dev/hyrule/map */
-/**
- * hyrule_map_read - Render the world map to the user.
- *
- * Generates an ASCII representation of the 10x10 world map.
- * This is shown when 'cat /dev/hyrule/map/view' is called.
- */
 static int
-hyrule_map_read(struct cdev *dev, struct uio *uio, int ioflag)
+hyruleMapRead(struct cdev *dev, struct uio *uio, int ioflag)
 {
 	char buf[1536];
 	int pos = 0;
 	int x, y;
 
-	sx_slock(&hyrule_sx);
+	sx_slock(&hyruleSx);
 
-	if (!hyrule_is_active()) {
-		const char *msg = (hyrule_power == 0) ? "POWER OFF\n" : "GAME OVER\n";
-		int msg_len = strlen(msg);
-		if (uio->uio_offset >= msg_len) {
-			sx_sunlock(&hyrule_sx);
+	if (!hyruleIsActive()) {
+		const char *msg = (hyrulePower == 0) ? "POWER OFF\n" : "GAME OVER\n";
+		int msgLen = strlen(msg);
+		if (uio->uio_offset >= msgLen) {
+			sx_sunlock(&hyruleSx);
 			return (0);
 		}
-		int error = uiomove(__DECONST(char *, msg) + uio->uio_offset, msg_len - uio->uio_offset, uio);
-		sx_sunlock(&hyrule_sx);
+		int error = uiomove(__DECONST(char *, msg) + uio->uio_offset, msgLen - uio->uio_offset, uio);
+		sx_sunlock(&hyruleSx);
 		return (error);
 	}
 
-	int lx = hyrule_get_prop_int("characters/link/location/x", 0);
-	int ly = hyrule_get_prop_int("characters/link/location/y", 0);
+	int lx = hyruleGetPropInt("characters/link/location/x", 0);
+	int ly = hyruleGetPropInt("characters/link/location/y", 0);
 
 	pos += snprintf(buf + pos, sizeof(buf) - pos, "--- Hyrule Map ---\n");
-	if (inside_entrance) {
-		pos += snprintf(buf + pos, sizeof(buf) - pos, "Inside %s at (%d, %d)\n\n", current_entrance_type, lx, ly);
-	}
-
 	for (y = 0; y < MAP_SIZE; y++) {
-		/* Row border */
 		for (x = 0; x < MAP_SIZE; x++) {
 			pos += snprintf(buf + pos, sizeof(buf) - pos, "+---");
 		}
 		pos += snprintf(buf + pos, sizeof(buf) - pos, "+\n");
-
-		/* Row content */
 		for (x = 0; x < MAP_SIZE; x++) {
 			if (x == lx && y == ly)
 				pos += snprintf(buf + pos, sizeof(buf) - pos, "| L ");
 			else
-				pos += snprintf(buf + pos, sizeof(buf) - pos, "| %c ", get_map_symbol(world_map[y][x]));
+				pos += snprintf(buf + pos, sizeof(buf) - pos, "| %c ", getMapSymbol(worldMap[y][x]));
 		}
 		pos += snprintf(buf + pos, sizeof(buf) - pos, "|\n");
 	}
-	/* Final border */
 	for (x = 0; x < MAP_SIZE; x++) {
 		pos += snprintf(buf + pos, sizeof(buf) - pos, "+---");
 	}
 	pos += snprintf(buf + pos, sizeof(buf) - pos, "+\n");
 
-	pos += snprintf(buf + pos, sizeof(buf) - pos, "Link at: (%d, %d)\n\n", lx, ly);
-	pos += snprintf(buf + pos, sizeof(buf) - pos, "Legend: L: Link, .: Field, W: Woods, 1-3: Dungeons, G: Ganon, F: Fairy, C: Cave, S: Shop, U: Upgrade\n");
-
 	if (uio->uio_offset >= pos) {
-		sx_sunlock(&hyrule_sx);
+		sx_sunlock(&hyruleSx);
 		return (0);
 	}
 
 	int error = uiomove(buf + uio->uio_offset, pos - uio->uio_offset, uio);
-	sx_sunlock(&hyrule_sx);
+	sx_sunlock(&hyruleSx);
 	return (error);
 }
 
-/* Read/Write /dev/hyrule/world/map_config */
 void
-hyrule_map_get_config(char *buf, size_t size)
+hyruleMapGetConfig(char *buf, size_t size)
 {
 	int x, y, pos = 0;
-
 	for (y = 0; y < MAP_SIZE; y++) {
 		for (x = 0; x < MAP_SIZE; x++) {
 			if (pos < size - 1)
-				buf[pos++] = world_map[y][x];
+				buf[pos++] = worldMap[y][x];
 		}
 		if (pos < size - 1)
 			buf[pos++] = '\n';
@@ -730,171 +486,117 @@ hyrule_map_get_config(char *buf, size_t size)
 }
 
 void
-hyrule_map_set_config(const char *input, size_t len)
+hyruleMapSetConfig(const char *input, size_t len)
 {
 	int x = 0, y = 0, i;
-
 	for (i = 0; i < len && y < MAP_SIZE; i++) {
 		if (isspace(input[i])) continue;
-		world_map[y][x] = input[i];
+		worldMap[y][x] = input[i];
 		x++;
 		if (x >= MAP_SIZE) {
 			x = 0;
 			y++;
 		}
 	}
-	hyrule_update_controller_nodes();
+	hyruleUpdateControllerNodes();
 }
 
 static int
-hyrule_map_config_read(struct cdev *dev, struct uio *uio, int ioflag)
+hyruleMapConfigRead(struct cdev *dev, struct uio *uio, int ioflag)
 {
 	char buf[128];
 	int x, y, pos = 0;
 
-	sx_slock(&hyrule_sx);
-
-	if (!hyrule_is_active()) {
-		const char *msg = (hyrule_power == 0) ? "POWER OFF\n" : "GAME OVER\n";
-		int msg_len = strlen(msg);
-		if (uio->uio_offset >= msg_len) {
-			sx_sunlock(&hyrule_sx);
+	sx_slock(&hyruleSx);
+	if (!hyruleIsActive()) {
+		const char *msg = (hyrulePower == 0) ? "POWER OFF\n" : "GAME OVER\n";
+		int msgLen = strlen(msg);
+		if (uio->uio_offset >= msgLen) {
+			sx_sunlock(&hyruleSx);
 			return (0);
 		}
-		int error = uiomove(__DECONST(char *, msg) + uio->uio_offset, msg_len - uio->uio_offset, uio);
-		sx_sunlock(&hyrule_sx);
+		int error = uiomove(__DECONST(char *, msg) + uio->uio_offset, msgLen - uio->uio_offset, uio);
+		sx_sunlock(&hyruleSx);
 		return (error);
 	}
 
 	for (y = 0; y < MAP_SIZE; y++) {
 		for (x = 0; x < MAP_SIZE; x++) {
-			buf[pos++] = world_map[y][x];
+			buf[pos++] = worldMap[y][x];
 		}
 		buf[pos++] = '\n';
 	}
 	buf[pos] = '\0';
 
 	if (uio->uio_offset >= pos) {
-		sx_sunlock(&hyrule_sx);
+		sx_sunlock(&hyruleSx);
 		return (0);
 	}
-
 	int error = uiomove(buf + uio->uio_offset, pos - uio->uio_offset, uio);
-	sx_sunlock(&hyrule_sx);
+	sx_sunlock(&hyruleSx);
 	return (error);
 }
 
 static int
-hyrule_map_config_write(struct cdev *dev, struct uio *uio, int ioflag)
+hyruleMapConfigWrite(struct cdev *dev, struct uio *uio, int ioflag)
 {
 	char input[256];
 	int error, len, x = 0, y = 0, i;
 
-	sx_xlock(&hyrule_sx);
-
-	if (!hyrule_power) {
-		sx_xunlock(&hyrule_sx);
+	sx_xlock(&hyruleSx);
+	if (!hyrulePower) {
+		sx_xunlock(&hyruleSx);
 		return (EACCES);
 	}
-
 	len = MIN(uio->uio_resid, sizeof(input) - 1);
 	error = uiomove(input, len, uio);
 	if (error) {
-		sx_xunlock(&hyrule_sx);
+		sx_xunlock(&hyruleSx);
 		return (error);
 	}
 	input[len] = '\0';
-
 	for (i = 0; i < len && y < MAP_SIZE; i++) {
 		if (isspace(input[i])) continue;
-		world_map[y][x] = input[i];
+		worldMap[y][x] = input[i];
 		x++;
 		if (x >= MAP_SIZE) {
 			x = 0;
 			y++;
 		}
 	}
-	sx_xunlock(&hyrule_sx);
-	hyrule_update_controller_nodes();
+	sx_xunlock(&hyruleSx);
+	hyruleUpdateControllerNodes();
 	return (0);
 }
 
-
-/**
- * hyrule_map_drain - Ensure all map updates are finished.
- */
 void
-hyrule_map_drain(void)
+hyruleMapDrain(void)
 {
-	taskqueue_drain(taskqueue_thread, &local_update_task);
+	taskqueue_drain(taskqueue_thread, &localUpdateTask);
 }
 
-/**
- * hyrule_map_init - Set up the initial world state.
- */
 void
-hyrule_map_init(void)
+hyruleMapInit(void)
 {
 	int x, y;
-
-	TASK_INIT(&local_update_task, 0, hyrule_update_local_nodes_task, NULL);
-
-	/* Initialize map with some fields and a dungeon */
+	TASK_INIT(&localUpdateTask, 0, hyruleUpdateLocalNodesTask, NULL);
 	for (y = 0; y < MAP_SIZE; y++) {
 		for (x = 0; x < MAP_SIZE; x++) {
-			world_map[y][x] = 'f';
-			world_entrances[y][x] = 0;
+			worldMap[y][x] = 'f';
+			worldEntrances[y][x] = 0;
 		}
 	}
-	world_map[2][2] = '1'; /* Dungeon 1 at (2,2) */
-	world_map[2][7] = '2'; /* Dungeon 2 at (7,2) */
-	world_map[7][2] = '3'; /* Dungeon 3 at (2,7) */
-	world_map[5][5] = 'g'; /* Ganon's Castle at (5,5) */
-	world_map[9][9] = 'u'; /* Upgrade Cave at (9,9) */
-	world_map[5][0] = 'W'; /* Blocked woods at (0,5) */
-	world_entrances[0][0] = 'c'; /* Cave at (0,0) */
-	world_entrances[2][2] = '1';
-	world_entrances[2][7] = '2';
-	world_entrances[7][2] = '3';
-	world_entrances[5][5] = 'g';
-	world_entrances[9][9] = 'u';
-	
-	hyrule_update_local_nodes();
+	worldMap[2][2] = '1';
+	worldMap[2][7] = '2';
+	worldMap[7][2] = '3';
+	worldMap[5][5] = 'g';
+	worldMap[9][9] = 'u';
+	worldMap[5][0] = 'W';
+	worldEntrances[0][0] = 'c';
+	worldEntrances[2][2] = '1';
+	worldEntrances[2][7] = '2';
+	worldEntrances[7][2] = '3';
+	worldEntrances[5][5] = 'g';
+	worldEntrances[9][9] = 'u';
+	hyruleUpdateLocalNodes();
 }
-
-/* 
- * Character device operations for the map.
- */
-struct cdevsw hyrule_map_cdevsw = {
-	.d_version = D_VERSION,
-	.d_open = hyrule_open,
-	.d_close = hyrule_close,
-	.d_read = hyrule_map_read,
-	.d_ioctl = hyrule_ioctl,
-	.d_poll = hyrule_poll,
-	.d_mmap = hyrule_mmap,
-	.d_strategy = hyrule_strategy,
-	.d_kqfilter = hyrule_kqfilter,
-	.d_fdopen = hyrule_fdopen,
-	.d_mmap_single = hyrule_mmap_single,
-	.d_purge = hyrule_purge,
-	.d_name = "hyrule_map",
-};
-
-struct cdevsw hyrule_map_config_cdevsw = {
-	.d_version = D_VERSION,
-	.d_open = hyrule_open,
-	.d_close = hyrule_close,
-	.d_read = hyrule_map_config_read,
-	.d_write = hyrule_map_config_write,
-	.d_ioctl = hyrule_ioctl,
-	.d_poll = hyrule_poll,
-	.d_mmap = hyrule_mmap,
-	.d_strategy = hyrule_strategy,
-	.d_kqfilter = hyrule_kqfilter,
-	.d_fdopen = hyrule_fdopen,
-	.d_mmap_single = hyrule_mmap_single,
-	.d_purge = hyrule_purge,
-	.d_name = "hyrule_config",
-};
-

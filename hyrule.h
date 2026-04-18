@@ -46,87 +46,93 @@
 
 #define MAP_SIZE 10
 
-/*
- * Hyrule Kernel Module Structure
- */
-
-/**
- * struct hyrule_prop - Represents a single property/node in the system.
- *
- * Each instance of this structure corresponds to a character device under /dev/hyrule/.
- * @cdev: Pointer to the kernel's character device structure.
- * @name: The path of the property (e.g., "characters/link/stats/health").
- * @value: The current value of the property, stored as a string.
- * @default_value: The value this property returns to after a reset.
- * @next: Linked list pointers for the global property list.
- */
-struct hyrule_prop {
-	struct cdev *cdev;
-	char name[256];
-	char value[1024]; /* Enough for 10x10 map and strings */
-	char default_value[1024];
-	LIST_ENTRY(hyrule_prop) next;
-};
-
 /* 
- * Global state and locks.
+ * Variables (Global state and locks)
  * 
- * hyrule_mtx: Fast leaf mutex for list integrity.
- * hyrule_sx: Sleepable SX lock for data contents and I/O.
- * prop_list: Head of the linked list of all properties.
+ * hyruleMtx: Fast leaf mutex for list integrity.
+ * hyruleSx: Sleepable SX lock for data contents and I/O.
+ * propList: Head of the linked list of all properties.
  */
-extern struct mtx hyrule_mtx;
-extern struct sx hyrule_sx;
-extern LIST_HEAD(prop_head, hyrule_prop) prop_list;
-extern int hyrule_power;
-extern int hyrule_cartridge;
-extern int hyrule_invincible;
+struct hyruleProp;
+extern struct mtx hyruleMtx;
+extern struct sx hyruleSx;
+extern LIST_HEAD(propHead, hyruleProp) propList;
+extern int hyrulePower;
+extern int hyruleCartridge;
+extern int hyruleInvincible;
 
 /* 
  * Shared device operations (Handlers).
  * These follow the FreeBSD cdevsw (character device switch) interface.
  */
-d_open_t  hyrule_open;
-d_close_t hyrule_close;
-d_read_t  hyrule_read;
-d_write_t hyrule_write;
-d_ioctl_t hyrule_ioctl;
-d_poll_t  hyrule_poll;
-d_mmap_t  hyrule_mmap;
-d_kqfilter_t hyrule_kqfilter;
-d_strategy_t hyrule_strategy;
-d_fdopen_t hyrule_fdopen;
-d_mmap_single_t hyrule_mmap_single;
-d_purge_t hyrule_purge;
+extern struct cdevsw hyruleMapCdevsw;
+extern struct cdevsw hyruleMapConfigCdevsw;
+extern struct cdevsw hyruleControllerCdevsw;
+extern struct cdevsw hyruleSaveCdevsw;
+extern struct cdevsw hyruleLoadCdevsw;
+extern struct cdevsw hyruleLocalCdevsw;
+
+/*
+ * Structs/Types
+ */
+
+/**
+ * struct hyruleProp - Represents a single property/node in the system.
+ *
+ * Each instance of this structure corresponds to a character device under /dev/hyrule/.
+ * @cdev: Pointer to the kernel's character device structure.
+ * @name: The path of the property (e.g., "characters/link/stats/health").
+ * @value: The current value of the property, stored as a string.
+ * @defaultValue: The value this property returns to after a reset.
+ * @next: Linked list pointers for the global property list.
+ */
+struct hyruleProp {
+	struct cdev *cdev;
+	char name[256];
+	char value[1024]; /* Enough for 10x10 map and strings */
+	char defaultValue[1024];
+	LIST_ENTRY(hyruleProp) next;
+};
+
+/* 
+ * Methods/Functions (Prototypes)
+ */
+
+/* Shared device operations (Handlers) */
+d_open_t  hyruleOpen;
+d_close_t hyruleClose;
+d_read_t  hyruleRead;
+d_write_t hyruleWrite;
+d_ioctl_t hyruleIoctl;
+d_poll_t  hyrulePoll;
+d_mmap_t  hyruleMmap;
+d_kqfilter_t hyruleKqfilter;
+d_strategy_t hyruleStrategy;
+d_fdopen_t hyruleFdopen;
+d_mmap_single_t hyruleMmapSingle;
+d_purge_t hyrulePurge;
 
 /* Helper functions in hyrule.c */
-int add_hyrule_node(const char *path, const char *initial_val);
-int add_hyrule_node_custom(const char *path, const char *initial_val, struct cdevsw *sw);
-void remove_hyrule_node(struct hyrule_prop *p);
-void hyrule_reset(void);
-int hyrule_is_active(void);
-int hyrule_get_prop_int(const char *name, int default_val);
-void hyrule_set_prop_int(const char *name, int val);
+int addHyruleNode(const char *path, const char *initialVal);
+int addHyruleNodeCustom(const char *path, const char *initialVal, struct cdevsw *sw);
+void removeHyruleNode(struct hyruleProp *p);
+void hyruleReset(void);
+int hyruleIsActive(void);
+int hyruleGetPropInt(const char *name, int defaultVal);
+void hyruleSetPropInt(const char *name, int val);
 
 /* Map logic in hyrule_map.c */
-extern struct cdevsw hyrule_map_cdevsw;
-extern struct cdevsw hyrule_map_config_cdevsw;
-extern struct cdevsw hyrule_controller_cdevsw;
-extern struct cdevsw hyrule_save_cdevsw;
-extern struct cdevsw hyrule_load_cdevsw;
-extern struct cdevsw hyrule_local_cdevsw;
-
-void hyrule_map_init(void);
-int hyrule_map_is_accessible(int x, int y);
-void hyrule_map_get_config(char *buf, size_t size);
-void hyrule_map_set_config(const char *input, size_t len);
-void hyrule_update_controller_nodes(void);
-void hyrule_update_local_nodes(void);
-void hyrule_update_status_nodes(void);
-void hyrule_map_drain(void);
-void hyrule_input_drain(void);
+void hyruleMapInit(void);
+int hyruleMapIsAccessible(int x, int y);
+void hyruleMapGetConfig(char *buf, size_t size);
+void hyruleMapSetConfig(const char *input, size_t len);
+void hyruleUpdateControllerNodes(void);
+void hyruleUpdateLocalNodes(void);
+void hyruleUpdateStatusNodes(void);
+void hyruleMapDrain(void);
+void hyruleInputDrain(void);
 
 /* Input logic in hyrule_input.c */
-void hyrule_input_init(void);
+void hyruleInputInit(void);
 
 #endif /* _HYRULE_H_ */
